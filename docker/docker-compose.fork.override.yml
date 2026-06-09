@@ -4,5 +4,7 @@ services:
     ports: []
     environment:
       DATABASE_URL: "${DATABASE_URL:?DATABASE_URL must be set}"
+      ANTHROPIC_BASE_URL:
+      ANTHROPIC_AUTH_TOKEN:
     volumes:
       - "${HERMES_DATA_DIR:?HERMES_DATA_DIR must be set}:/paperclip/.hermes"
