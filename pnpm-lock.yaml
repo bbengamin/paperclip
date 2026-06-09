@@ -329,8 +329,8 @@ importers:
         specifier: ^1.29.0
         version: 1.29.0(zod@3.25.76)
       '@paperclipai/shared':
-        specifier: workspace:*
-        version: link:../shared
+        specifier: 2026.608.0-canary.1
+        version: 2026.608.0-canary.1
       zod:
         specifier: ^3.24.2
         version: 3.25.76
@@ -3095,6 +3095,9 @@ packages:
 
   '@paperclipai/adapter-utils@2026.325.0':
     resolution: {integrity: sha512-YDVSAgjkeJ0PvxXDJVN9MZDX7oYRzidLtGHmGgRGd6gSk/bF2ygAKvND4FI1YxDc/cRLQjqAFCpCYaC/9wqIEA==}
+
+  '@paperclipai/shared@2026.608.0-canary.1':
+    resolution: {integrity: sha512-Bv46ajYxWabHpzmkETJXxmbF22ZZIkxFcmjYnXbWRzbeTpHn/msYVQnqKKeU2bPbRvVK33aJqlIVK3wrD745nA==}
 
   '@paralleldrive/cuid2@2.3.1':
     resolution: {integrity: sha512-XO7cAxhnTZl0Yggq6jOgjiOHhbgcO4NqFqwSmQpjK3b6TEE6Uj/jfSk6wzYyemh3+I0sHirKSetjQwn5cZktFw==}
@@ -10458,6 +10461,10 @@ snapshots:
     optional: true
 
   '@paperclipai/adapter-utils@2026.325.0': {}
+
+  '@paperclipai/shared@2026.608.0-canary.1':
+    dependencies:
+      zod: 3.25.76
 
   '@paralleldrive/cuid2@2.3.1':
     dependencies:
