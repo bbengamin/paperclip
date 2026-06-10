@@ -6,5 +6,17 @@ services:
       DATABASE_URL: "${DATABASE_URL:?DATABASE_URL must be set}"
       ANTHROPIC_BASE_URL:
       ANTHROPIC_AUTH_TOKEN:
+      PAPERCLIP_DOCKER_RUNTIME: "${PAPERCLIP_DOCKER_RUNTIME:-rootless}"
     volumes:
       - "${HERMES_DATA_DIR:?HERMES_DATA_DIR must be set}:/paperclip/.hermes"
+    security_opt:
+      - seccomp:unconfined
+      - apparmor:unconfined
+    cap_add:
+      - SYS_ADMIN
+      - SETUID
+      - SETGID
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun
+    privileged: true

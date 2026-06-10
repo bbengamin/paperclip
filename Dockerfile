@@ -66,8 +66,9 @@ RUN npm install --global --omit=dev @anthropic-ai/claude-code@latest @openai/cod
   && mkdir -p /paperclip \
   && chown node:node /paperclip
 
-COPY scripts/docker-entrypoint.sh /usr/local/bin/
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+COPY scripts/docker-install-agent-runtime.sh scripts/docker-agent-runtime-entrypoint.sh scripts/docker-entrypoint.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/docker-install-agent-runtime.sh /usr/local/bin/docker-agent-runtime-entrypoint.sh /usr/local/bin/docker-entrypoint.sh \
+  && /usr/local/bin/docker-install-agent-runtime.sh
 
 ENV NODE_ENV=production \
   HOME=/paperclip \
@@ -81,6 +82,7 @@ ENV NODE_ENV=production \
   PAPERCLIP_CONFIG=/paperclip/instances/default/config.json \
   PAPERCLIP_DEPLOYMENT_MODE=authenticated \
   PAPERCLIP_DEPLOYMENT_EXPOSURE=private \
+  PAPERCLIP_DOCKER_RUNTIME=rootless \
   OPENCODE_ALLOW_ALL_MODELS=true \
   GEMINI_SANDBOX=false
 

@@ -12,6 +12,8 @@ docker build -t paperclip-local .
 
 The Dockerfile installs common agent tools (`git`, `gh`, `curl`, `wget`, `ripgrep`, `python3`) and the Claude, Codex, and OpenCode CLIs.
 
+Fork note: this fork also includes an optional nested Docker runtime for agent runs. See [FORK-DOCKER.md](./FORK-DOCKER.md).
+
 Build arguments:
 
 | Arg | Default | Purpose |

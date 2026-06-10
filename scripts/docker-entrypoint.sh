@@ -26,4 +26,8 @@ if [ "$changed" = "1" ]; then
     chown -R node:node /paperclip
 fi
 
+if [ -x /usr/local/bin/docker-agent-runtime-entrypoint.sh ]; then
+    . /usr/local/bin/docker-agent-runtime-entrypoint.sh
+fi
+
 exec gosu node "$@"
