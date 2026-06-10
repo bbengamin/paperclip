@@ -19,6 +19,8 @@ start_rootless_docker() {
 
     export XDG_RUNTIME_DIR="$docker_run_dir"
     export DOCKER_HOST="unix://${docker_run_dir}/docker.sock"
+    mkdir -p /var/run
+    ln -sfn "${docker_run_dir}/docker.sock" /var/run/docker.sock
 
     if [ -S "${docker_run_dir}/docker.sock" ] && docker version >/dev/null 2>&1; then
         echo "Rootless Docker daemon already available at ${docker_run_dir}/docker.sock" >&2
