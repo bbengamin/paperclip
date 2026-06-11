@@ -259,6 +259,22 @@ Wrapper rules:
 - Keep wrappers extensible. New runtime wrappers should reuse the shared helper layer and add only runtime-specific composition.
 - Do not silently change existing agents. Add wrapper adapter types first, then migrate agents deliberately.
 
+## Remote Git Sandbox Utilities
+
+Remote adapters that intentionally run in an ephemeral hosted sandbox can use `@paperclipai/adapter-utils/remote-git-sandbox` instead of uploading and downloading a full workspace archive.
+
+Use this layer only for explicit remote Git adapters, such as a future Codex Remote adapter. It is provider-agnostic: the adapter owns sandbox creation, credentials, and shutdown, while the shared helper owns the Git workflow inside the sandbox.
+
+The supported flow:
+
+- Derive the repo URL, base ref, work branch, and sandbox cwd with `deriveRemoteGitSandboxSpec()`.
+- Prepare the sandbox repo with `prepareRemoteGitSandbox()`, which clones or fetches, checks out the work branch, and runs an optional setup command.
+- Run the adapter inside `sandbox.spec.remoteCwd`.
+- Finalize with `sandbox.finalize()`, which reads `git status`, commits dirty work when present, and pushes the work branch when enabled.
+- Wrap execution in `withRemoteGitSandbox()` when cleanup commands or provider cleanup hooks must run even after agent, commit, or push failures.
+
+This layer does not include Daytona or any other provider API. Provider-specific wrappers should pass a generic runner that can execute shell commands in the sandbox and cleanup hooks that stop or release the sandbox lease.
+
 ## Skills Injection
 
 Make Paperclip skills discoverable to your agent runtime without writing to the agent's working directory:
@@ -271,6 +287,8 @@ Make Paperclip skills discoverable to your agent runtime without writing to the 
 ## Cross-run workspace persistence (no-remote-git contract)
 
 The local execution-workspace cwd is the **only** persistence boundary across runs. No adapter may depend on a git remote for cross-run state.
+
+Exception: an adapter type that explicitly documents itself as a remote Git sandbox adapter may use the remote Git sandbox utilities above. That opt-in path treats the pushed branch as the handoff artifact and must not silently change the behavior of existing local or SSH adapter types.
 
 The supported round-trip:
 

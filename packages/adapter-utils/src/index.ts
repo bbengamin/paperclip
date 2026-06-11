@@ -77,6 +77,21 @@ export type {
   PaperclipRuntimeStateStrategyInput,
   PaperclipRuntimeStateStrategyResult,
 } from "./paperclip-wrapper.js";
+export {
+  deriveRemoteGitSandboxSpec,
+  prepareRemoteGitSandbox,
+  withRemoteGitSandbox,
+} from "./remote-git-sandbox.js";
+export type {
+  PreparedRemoteGitSandbox,
+  RemoteGitSandboxCleanupHook,
+  RemoteGitSandboxFinalizeOptions,
+  RemoteGitSandboxFinalizeResult,
+  RemoteGitSandboxIssueContext,
+  RemoteGitSandboxRunner,
+  RemoteGitSandboxSpec,
+  RemoteGitSandboxWorkspaceContext,
+} from "./remote-git-sandbox.js";
 export { inferOpenAiCompatibleBiller } from "./billing.js";
 // Keep the root adapter-utils entry browser-safe because the UI imports it.
 // The sandbox callback bridge stays available via its dedicated subpath export.
