@@ -75,6 +75,8 @@ Code state moves between runs through the local execution-workspace cwd alone â€
 
 The invariant is enforced by the "no-remote-git contract" case in `packages/adapter-utils/src/ssh-fixture.test.ts`, which asserts a remote-only commit reaches the local worktree with no remote configured at any point.
 
+Explicit remote Git sandbox adapters are the exception to this default. A sandbox provider such as Daytona may opt into `workspaceStrategy: "git_clone"` for Git-backed projects; in that mode the provider clones or fetches the configured repo inside the sandbox, checks out a work branch, and treats the pushed branch as the handoff artifact instead of uploading/downloading a full workspace archive. This must be adapter/provider-specific and visible in configuration, not an implicit change to local or SSH runs.
+
 ## Current implementation guarantees
 
 With the current implementation:

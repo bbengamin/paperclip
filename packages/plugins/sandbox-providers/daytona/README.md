@@ -22,12 +22,15 @@ Configure Daytona from `Company Settings -> Environments`, not from the plugin's
 - When you save an environment, Paperclip stores pasted API keys as company secrets.
 - `DAYTONA_API_KEY` remains an optional host-level fallback when an environment omits the key.
 - Optional `apiUrl` and `target` settings map directly to the Daytona SDK/client configuration. If `apiUrl` is omitted, the Daytona SDK uses its default endpoint.
+- Optional `workspaceStrategy: "git_clone"` switches workspace realization from the default archive-compatible folder mode to a Git-backed clone inside the Daytona sandbox. Use this only for project workspaces with `repoUrl` metadata.
 
 Notes:
 
 - The current published Daytona SDK package is `@daytonaio/sdk`.
 - The driver supports both `snapshot`-based and `image`-based sandbox creation. If both are set, validation rejects the config as ambiguous.
 - Reusable leases map to Daytona stop/start semantics. Non-reusable leases are deleted on release.
+- Git-clone workspace realization clones or fetches the configured repo, checks out the configured base ref, creates a `paperclip/daytona/<issue>` work branch, runs the workspace provision command when present, and records repo/branch/base commit metadata. It does not upload or download a full workspace archive.
+- If `workspaceStrategy` is omitted, existing archive-based sandbox behavior remains available for non-Git workspaces and explicitly archive-style setups.
 
 ## Local development
 
