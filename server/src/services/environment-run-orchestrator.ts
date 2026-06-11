@@ -51,6 +51,21 @@ import type { PluginWorkerManager } from "./plugin-worker-manager.js";
 // Error types
 // ---------------------------------------------------------------------------
 
+function readWorkspaceRealizationHints(config: Record<string, unknown> | null | undefined): Record<string, unknown> {
+  const raw = parseObject(config?.workspaceRealization);
+  const hints: Record<string, unknown> = {};
+  const workspaceStrategy = typeof raw.workspaceStrategy === "string" ? raw.workspaceStrategy.trim() : "";
+  if (workspaceStrategy === "git_clone" || workspaceStrategy === "remote_git") {
+    hints.workspaceStrategy = "git_clone";
+  }
+  const workBranch = typeof raw.workBranch === "string" ? raw.workBranch.trim() : "";
+  if (workBranch.length > 0) {
+    hints.workBranch = workBranch;
+    hints.remoteGitWorkBranch = workBranch;
+  }
+  return hints;
+}
+
 export type EnvironmentErrorCode =
   | "environment_not_found"
   | "environment_inactive"
@@ -342,6 +357,7 @@ export function environmentRunOrchestrator(
     executionWorkspace: RealizedExecutionWorkspace;
     effectiveExecutionWorkspaceMode: string | null;
     persistedExecutionWorkspace: ExecutionWorkspace | null;
+    adapterConfig?: Record<string, unknown> | null;
   }): Promise<EnvironmentRealizationResult> {
     const {
       environment,
@@ -380,6 +396,7 @@ export function environmentRunOrchestrator(
           typeof lease.metadata?.remoteCwd === "string" && lease.metadata.remoteCwd.trim().length > 0
             ? lease.metadata.remoteCwd
             : undefined;
+        const workspaceRealizationHints = readWorkspaceRealizationHints(input.adapterConfig);
         const workspaceRealizationResult = await environmentRuntime.realizeWorkspace({
           environment,
           lease,
@@ -388,6 +405,7 @@ export function environmentRunOrchestrator(
             remotePath: remoteCwd,
             mode: persistedExecutionWorkspace?.mode ?? effectiveExecutionWorkspaceMode ?? undefined,
             metadata: {
+              ...workspaceRealizationHints,
               workspaceRealizationRequest,
             },
           },

@@ -8333,6 +8333,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       executionWorkspace,
       effectiveExecutionWorkspaceMode,
       persistedExecutionWorkspace,
+      adapterConfig: persistedWorkspaceManagedConfig,
     });
     activeEnvironmentLease = {
       ...activeEnvironmentLease,

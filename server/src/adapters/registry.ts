@@ -143,6 +143,7 @@ import { getDisabledAdapterTypes } from "../services/adapter-plugin-store.js";
 import { processAdapter } from "./process/index.js";
 import { httpAdapter } from "./http/index.js";
 import { createCodexPaperclipLocalAdapter } from "./wrappers/codex-paperclip-local.js";
+import { createCodexRemoteAdapter } from "./wrappers/codex-remote.js";
 import { createHermesPaperclipLocalAdapter } from "./wrappers/hermes-paperclip-local.js";
 import { createOpenCodePaperclipLocalAdapter } from "./wrappers/opencode-paperclip-local.js";
 
@@ -517,6 +518,23 @@ Use codex_local instead when you want the generic upstream Codex adapter behavio
 `,
 });
 
+const codexRemoteAdapter = createCodexRemoteAdapter({
+  base: codexLocalAdapter,
+  agentConfigurationDoc: `${codexAgentConfigurationDoc}
+
+Remote adapter: codex_remote
+
+Use this adapter when Codex should run in a remote sandbox environment such as Daytona and the project workspace should be realized by cloning/fetching Git in the sandbox instead of uploading and downloading workspace archives.
+
+Required operator setup:
+- select a sandbox environment for the agent, usually a Daytona environment
+- ensure that environment can access the configured project repoUrl
+- configure Daytona with workspaceStrategy: "git_clone" or rely on this adapter's workspace realization hint
+
+Use codex_local for local or SSH execution where Paperclip should use the existing local/remote filesystem workflow.
+`,
+});
+
 const openCodePaperclipLocalAdapter = createOpenCodePaperclipLocalAdapter({
   base: openCodeLocalAdapter,
   agentConfigurationDoc: `${openCodeAgentConfigurationDoc}
@@ -569,6 +587,7 @@ function registerBuiltInAdapters() {
     acpxLocalAdapter,
     claudeLocalAdapter,
     codexLocalAdapter,
+    codexRemoteAdapter,
     codexPaperclipLocalAdapter,
     openCodeLocalAdapter,
     openCodePaperclipLocalAdapter,

@@ -20,6 +20,7 @@ When a heartbeat fires, Paperclip:
 |---------|----------|-------------|
 | [Claude Local](/adapters/claude-local) | `claude_local` | Runs Claude Code CLI locally |
 | [Codex Local](/adapters/codex-local) | `codex_local` | Runs OpenAI Codex CLI locally |
+| [Codex Remote](/adapters/codex-remote) | `codex_remote` | Runs Codex in Git-backed remote sandboxes such as Daytona |
 | [Gemini Local](/adapters/gemini-local) | `gemini_local` | Runs Gemini CLI locally (experimental — adapter package exists, not yet in stable type enum) |
 | OpenCode Local | `opencode_local` | Runs OpenCode CLI locally (multi-provider `provider/model`) |
 | Cursor | `cursor` | Runs Cursor in background mode |
@@ -80,6 +81,7 @@ my-adapter/
 ## Choosing an Adapter
 
 - **Need a coding agent?** Use `claude_local`, `codex_local`, `opencode_local`, `hermes_local`, or install `droid_local` as an external plugin
+- **Need Codex in Daytona/Git-backed sandboxes?** Use `codex_remote`
 - **Need Paperclip-owned runtime policy?** Use `hermes_paperclip_local`, `codex_paperclip_local`, or `opencode_paperclip_local` and migrate one agent at a time
 - **Need to run a script or command?** Use `process`
 - **Need to call an external service?** Use `http`

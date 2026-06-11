@@ -13,6 +13,7 @@ import { SchemaConfigFields } from "./schema-config-fields";
 import { codexLocalUIAdapter } from "./codex-local";
 import { hermesLocalUIAdapter } from "./hermes-local";
 import { openCodeLocalUIAdapter } from "./opencode-local";
+import { defaultCreateValues } from "../components/agent-config-defaults";
 
 const externalUIAdapter: UIAdapterModule = {
   type: "external_test",
@@ -67,6 +68,31 @@ describe("ui adapter registry", () => {
     expect(getAdapterLabel("hermes_paperclip_local")).toBe("Hermes Agent (Paperclip local)");
     expect(getAdapterLabel("opencode_paperclip_local")).toBe("OpenCode (Paperclip local)");
     expect(getAdapterDisplay("codex_paperclip_local").description).toContain("Paperclip runtime policy");
+  });
+
+  it("lists Codex Remote distinctly from Codex Local", () => {
+    const codexRemote = getUIAdapter("codex_remote");
+
+    expect(getUIAdapter("codex_local")).toBe(codexLocalUIAdapter);
+    expect(codexRemote.type).toBe("codex_remote");
+    expect(codexRemote).not.toBe(codexLocalUIAdapter);
+    expect(getAdapterLabel("codex_remote")).toBe("Codex (remote)");
+    expect(getAdapterDisplay("codex_remote").description).toContain("Git-backed sandboxes");
+  });
+
+  it("builds Codex Remote config with a Git-clone workspace realization hint", () => {
+    const config = getUIAdapter("codex_remote").buildAdapterConfig({
+      ...defaultCreateValues,
+      adapterType: "codex_remote",
+      model: "gpt-5.3-codex",
+    });
+
+    expect(config).toMatchObject({
+      model: "gpt-5.3-codex",
+      workspaceRealization: {
+        workspaceStrategy: "git_clone",
+      },
+    });
   });
 
   it("reuses native config builders and parsers for Paperclip wrapper adapters", () => {

@@ -25,6 +25,7 @@ import { HermesIcon } from "@/components/HermesIcon";
 const TYPE_SUFFIXES: Record<string, string> = {
   _paperclip_local: "Paperclip local",
   _local: "local",
+  _remote: "remote",
   _gateway: "gateway",
 };
 
@@ -73,6 +74,12 @@ const adapterDisplayMap: Record<string, AdapterDisplayInfo> = {
     description: "Local Codex agent",
     icon: Code,
     recommended: true,
+  },
+  codex_remote: {
+    label: "Codex",
+    description: "Remote Codex agent for Git-backed sandboxes",
+    icon: Code,
+    experimental: true,
   },
   codex_paperclip_local: {
     label: "Codex",

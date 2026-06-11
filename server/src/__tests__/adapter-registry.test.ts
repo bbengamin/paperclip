@@ -216,6 +216,17 @@ describe("server adapter registry", () => {
     expect(openCodeWrapper?.requiresMaterializedRuntimeSkills).toBe(true);
   });
 
+  it("exposes Codex Remote without replacing Codex Local", () => {
+    const nativeCodex = findActiveServerAdapter("codex_local");
+    const remoteCodex = findActiveServerAdapter("codex_remote");
+
+    expect(nativeCodex).not.toBeNull();
+    expect(remoteCodex).not.toBeNull();
+    expect(remoteCodex).not.toBe(nativeCodex);
+    expect(remoteCodex?.supportsLocalAgentJwt).toBe(true);
+    expect(remoteCodex?.agentConfigurationDoc).toContain("workspaceStrategy: \"git_clone\"");
+  });
+
   it("keeps unrelated external adapters separate from Paperclip wrapper adapters", () => {
     registerServerAdapter(externalAdapter);
 

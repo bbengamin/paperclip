@@ -154,6 +154,7 @@ function makeRealizeInput(overrides: {
   environment?: Environment;
   lease?: EnvironmentLease;
   persistedExecutionWorkspace?: ExecutionWorkspace | null;
+  adapterConfig?: Record<string, unknown> | null;
 } = {}): Parameters<ReturnType<typeof environmentRunOrchestrator>["realizeForRun"]>[0] {
   return {
     environment: overrides.environment ?? makeEnvironment("local"),
@@ -167,6 +168,7 @@ function makeRealizeInput(overrides: {
     persistedExecutionWorkspace: overrides.persistedExecutionWorkspace !== undefined
       ? overrides.persistedExecutionWorkspace
       : null,
+    adapterConfig: overrides.adapterConfig,
   };
 }
 
@@ -417,6 +419,41 @@ describe("environmentRunOrchestrator — realizeForRun", () => {
       env: {
         SHELL: "/bin/bash",
       },
+    }));
+  });
+
+  it("passes adapter workspace realization hints to sandbox providers", async () => {
+    mockResolveEnvironmentExecutionTarget.mockResolvedValue({
+      kind: "remote",
+      transport: "sandbox",
+      providerKey: "daytona",
+      remoteCwd: "/remote/workspace",
+      environmentId: "env-1",
+      leaseId: "lease-1",
+    });
+
+    const runtime = makeMockRuntime();
+    const orchestrator = environmentRunOrchestrator(mockDb, { environmentRuntime: runtime });
+
+    await orchestrator.realizeForRun(makeRealizeInput({
+      environment: makeEnvironment("sandbox"),
+      adapterConfig: {
+        workspaceRealization: {
+          workspaceStrategy: "git_clone",
+          workBranch: "paperclip/daytona/RL-203",
+        },
+      },
+    }));
+
+    expect(runtime.realizeWorkspace).toHaveBeenCalledWith(expect.objectContaining({
+      workspace: expect.objectContaining({
+        metadata: expect.objectContaining({
+          workspaceStrategy: "git_clone",
+          workBranch: "paperclip/daytona/RL-203",
+          remoteGitWorkBranch: "paperclip/daytona/RL-203",
+          workspaceRealizationRequest: expect.any(Object),
+        }),
+      }),
     }));
   });
 

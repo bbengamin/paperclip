@@ -24,6 +24,18 @@ const codexPaperclipLocalUIAdapter: UIAdapterModule = {
   label: "Codex (Paperclip local)",
 };
 
+const codexRemoteUIAdapter: UIAdapterModule = {
+  ...codexLocalUIAdapter,
+  type: "codex_remote",
+  label: "Codex (remote)",
+  buildAdapterConfig: (values) => ({
+    ...codexLocalUIAdapter.buildAdapterConfig(values),
+    workspaceRealization: {
+      workspaceStrategy: "git_clone",
+    },
+  }),
+};
+
 const hermesPaperclipLocalUIAdapter: UIAdapterModule = {
   ...hermesLocalUIAdapter,
   type: "hermes_paperclip_local",
@@ -73,6 +85,7 @@ function registerBuiltInUIAdapters() {
     acpxLocalUIAdapter,
     claudeLocalUIAdapter,
     codexLocalUIAdapter,
+    codexRemoteUIAdapter,
     codexPaperclipLocalUIAdapter,
     cursorCloudUIAdapter,
     geminiLocalUIAdapter,
