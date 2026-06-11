@@ -328,6 +328,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     legacyRemoteExecution: ctx.executionTransport?.remoteExecution,
   });
   const executionTargetIsRemote = adapterExecutionTargetIsRemote(executionTarget);
+  const remoteGitSandboxConfig = parseObject(config.remoteGitSandbox);
+  const providerRealizedRemoteGitWorkspace =
+    executionTargetIsRemote && remoteGitSandboxConfig.enabled === true;
   const configuredCodexHome =
     typeof envConfig.CODEX_HOME === "string" && envConfig.CODEX_HOME.trim().length > 0
       ? path.resolve(envConfig.CODEX_HOME.trim())
@@ -365,7 +368,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   );
   const graceSec = asNumber(config.graceSec, 20);
   let effectiveExecutionCwd = adapterExecutionTargetRemoteCwd(executionTarget, cwd);
-  const preparedExecutionTargetRuntime = executionTargetIsRemote
+  const preparedExecutionTargetRuntime = executionTargetIsRemote && !providerRealizedRemoteGitWorkspace
     ? await (async () => {
         await onLog(
           "stdout",
@@ -389,6 +392,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         });
       })()
     : null;
+  if (providerRealizedRemoteGitWorkspace) {
+    await onLog(
+      "stdout",
+      `[paperclip] Using provider-realized remote Git workspace at ${effectiveExecutionCwd}; skipping workspace archive sync.\n`,
+    );
+  }
   if (preparedExecutionTargetRuntime?.workspaceRemoteDir) {
     effectiveExecutionCwd = preparedExecutionTargetRuntime.workspaceRemoteDir;
   }
@@ -399,7 +408,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     ? () => preparedExecutionTargetRuntime.restoreWorkspace()
     : null;
   let paperclipBridge: Awaited<ReturnType<typeof startAdapterExecutionTargetPaperclipBridge>> = null;
-  const remoteCodexHome = executionTargetIsRemote
+  const remoteCodexHome = executionTargetIsRemote && !providerRealizedRemoteGitWorkspace
     ? preparedExecutionTargetRuntime?.assetDirs.home ??
       path.posix.join(effectiveExecutionCwd, ".paperclip-runtime", "codex", "home")
     : null;
@@ -481,7 +490,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   if (runtimePrimaryUrl) {
     env.PAPERCLIP_RUNTIME_PRIMARY_URL = runtimePrimaryUrl;
   }
-  env.CODEX_HOME = remoteCodexHome ?? effectiveCodexHome;
+  if (!providerRealizedRemoteGitWorkspace || !executionTargetIsRemote) {
+    env.CODEX_HOME = remoteCodexHome ?? effectiveCodexHome;
+  } else if (typeof envConfig.CODEX_HOME !== "string" || envConfig.CODEX_HOME.trim().length === 0) {
+    delete env.CODEX_HOME;
+  }
   if (!hasExplicitApiKey && authToken) {
     env.PAPERCLIP_API_KEY = authToken;
   }

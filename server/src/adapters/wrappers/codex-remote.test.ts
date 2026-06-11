@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { AdapterExecutionContext, ServerAdapterModule } from "@paperclipai/adapter-utils";
+import type { RunProcessResult } from "@paperclipai/adapter-utils/server-utils";
 
 import {
   applyCodexRemoteDefaults,
@@ -7,7 +8,49 @@ import {
   createCodexRemoteAdapter,
 } from "./codex-remote.js";
 
-function createContext(config: Record<string, unknown> = {}): AdapterExecutionContext {
+function ok(stdout = ""): RunProcessResult {
+  return {
+    exitCode: 0,
+    signal: null,
+    timedOut: false,
+    stdout,
+    stderr: "",
+    pid: null,
+    startedAt: "2026-06-11T00:00:00.000Z",
+  };
+}
+
+function fail(stderr: string): RunProcessResult {
+  return {
+    exitCode: 1,
+    signal: null,
+    timedOut: false,
+    stdout: "",
+    stderr,
+    pid: null,
+    startedAt: "2026-06-11T00:00:00.000Z",
+  };
+}
+
+function createRunner(handler?: (script: string) => RunProcessResult) {
+  const scripts: string[] = [];
+  return {
+    scripts,
+    runner: {
+      execute: vi.fn(async (input: { args?: string[] }) => {
+        const script = input.args?.[1] ?? "";
+        scripts.push(script);
+        return handler?.(script) ?? ok();
+      }),
+    },
+  };
+}
+
+function createContext(input: {
+  config?: Record<string, unknown>;
+  handler?: (script: string) => RunProcessResult;
+} = {}): AdapterExecutionContext & { runnerScripts: string[] } {
+  const { runner, scripts } = createRunner(input.handler);
   return {
     runId: "run-1",
     agent: {
@@ -23,9 +66,30 @@ function createContext(config: Record<string, unknown> = {}): AdapterExecutionCo
       sessionDisplayId: null,
       taskKey: null,
     },
-    config,
-    context: {},
+    config: input.config ?? {},
+    context: {
+      paperclipWorkspace: {
+        repoUrl: "https://github.com/example/repo",
+        repoRef: "main",
+        name: "paperclip",
+      },
+      paperclipIssue: {
+        id: "issue-201",
+        identifier: "RL-201",
+      },
+    },
+    executionTarget: {
+      kind: "remote",
+      transport: "sandbox",
+      providerKey: "daytona",
+      environmentId: "env-1",
+      leaseId: "lease-1",
+      remoteCwd: "/home/daytona/paperclip-workspace",
+      shellCommand: "bash",
+      runner,
+    },
     onLog: async () => {},
+    runnerScripts: scripts,
   };
 }
 
@@ -63,15 +127,24 @@ describe("codex_remote wrapper", () => {
     });
   });
 
-  it("delegates execution to Codex local with remote defaults applied", async () => {
+  it("prepares Git workspace, runs Codex remotely, commits, and pushes", async () => {
     const execute = vi.fn<ServerAdapterModule["execute"]>(async () => ({
       exitCode: 0,
       signal: null,
       timedOut: false,
+      resultJson: { codex: "ok" },
     }));
     const adapter = createCodexRemoteAdapter({ base: createBaseAdapter(execute) });
+    const ctx = createContext({
+      config: { model: "gpt-5.3-codex" },
+      handler: (script) => {
+        if (script === "git status --porcelain=v1") return ok(" M README.md\n");
+        if (script === "git rev-parse HEAD") return ok("abc123\n");
+        return ok();
+      },
+    });
 
-    await adapter.execute(createContext({ model: "gpt-5.3-codex" }));
+    const result = await adapter.execute(ctx);
 
     expect(adapter.type).toBe(CODEX_REMOTE_TYPE);
     expect(execute).toHaveBeenCalledTimes(1);
@@ -81,6 +154,84 @@ describe("codex_remote wrapper", () => {
       workspaceRealization: {
         workspaceStrategy: "git_clone",
       },
+      remoteGitSandbox: {
+        enabled: true,
+        workBranch: "paperclip/daytona/RL-201",
+        remoteCwd: "/home/daytona/paperclip-workspace",
+      },
     });
+    expect(delegatedCtx?.executionTarget).toMatchObject({
+      kind: "remote",
+      transport: "sandbox",
+      remoteCwd: "/home/daytona/paperclip-workspace",
+    });
+    expect(result.resultJson).toMatchObject({
+      codex: "ok",
+      remoteGit: {
+        dirty: true,
+        commitSha: "abc123",
+        pushed: true,
+        pushedBranch: "paperclip/daytona/RL-201",
+      },
+    });
+    expect(ctx.runnerScripts.join("\n")).toContain("git clone --no-checkout");
+    expect(ctx.runnerScripts.join("\n")).toContain("git checkout -B 'paperclip/daytona/RL-201' FETCH_HEAD");
+    expect(ctx.runnerScripts.join("\n")).toContain("git push origin HEAD:refs/heads/'paperclip/daytona/RL-201'");
+    expect(ctx.runnerScripts.join("\n")).not.toMatch(/\btar\b|base64|workspace-upload|workspace-download/);
+  });
+
+  it("surfaces clone failures before running Codex", async () => {
+    const execute = vi.fn<ServerAdapterModule["execute"]>();
+    const adapter = createCodexRemoteAdapter({ base: createBaseAdapter(execute) });
+    const ctx = createContext({
+      handler: (script) => script.includes("git clone") ? fail("repository not found") : ok(),
+    });
+
+    const result = await adapter.execute(ctx);
+
+    expect(execute).not.toHaveBeenCalled();
+    expect(result.exitCode).toBe(1);
+    expect(result.errorMessage).toContain("codex_remote_prepare_failed");
+    expect(result.errorMessage).toContain("repository not found");
+  });
+
+  it("does not commit or push when Codex execution fails", async () => {
+    const execute = vi.fn<ServerAdapterModule["execute"]>(async () => ({
+      exitCode: 1,
+      signal: null,
+      timedOut: false,
+      errorMessage: "Codex auth failed",
+    }));
+    const adapter = createCodexRemoteAdapter({ base: createBaseAdapter(execute) });
+    const ctx = createContext();
+
+    const result = await adapter.execute(ctx);
+
+    expect(result.errorMessage).toBe("Codex auth failed");
+    expect(ctx.runnerScripts.join("\n")).not.toContain("git status --porcelain=v1");
+    expect(ctx.runnerScripts.join("\n")).not.toContain("git push origin");
+  });
+
+  it("surfaces push failures after Codex succeeds", async () => {
+    const execute = vi.fn<ServerAdapterModule["execute"]>(async () => ({
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+    }));
+    const adapter = createCodexRemoteAdapter({ base: createBaseAdapter(execute) });
+    const ctx = createContext({
+      handler: (script) => {
+        if (script === "git status --porcelain=v1") return ok(" M README.md\n");
+        if (script === "git rev-parse HEAD") return ok("abc123\n");
+        if (script.includes("git push origin")) return fail("permission denied");
+        return ok();
+      },
+    });
+
+    const result = await adapter.execute(ctx);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.errorMessage).toContain("codex_remote_finalize_failed");
+    expect(result.errorMessage).toContain("permission denied");
   });
 });

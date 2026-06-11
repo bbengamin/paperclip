@@ -1,6 +1,6 @@
 # Codex Remote
 
-`codex_remote` runs the Codex adapter in a remote sandbox workflow. It is intended for Daytona or similar Git-backed sandboxes where the sandbox should clone/fetch the repository directly.
+`codex_remote` runs Codex in a remote Git-backed sandbox workflow. It is intended for Daytona or similar sandboxes where the sandbox should clone/fetch the repository directly, run Codex in that checkout, then commit and push the resulting work branch.
 
 Use it when:
 
@@ -28,7 +28,16 @@ When the UI creates a `codex_remote` agent, its adapter config includes:
 }
 ```
 
-During a run, Paperclip passes that hint to the environment provider as workspace metadata. The Daytona provider treats it as `workspaceStrategy: "git_clone"` and clones or fetches the project repo inside the sandbox instead of creating a workspace folder for archive sync.
+During environment realization, Paperclip passes that hint to the environment provider as workspace metadata. The Daytona provider treats it as `workspaceStrategy: "git_clone"` and clones or fetches the project repo inside the sandbox instead of creating a workspace folder for archive sync.
+
+During adapter execution, `codex_remote` also runs its own remote Git lifecycle through the shared remote Git sandbox layer:
+
+- prepare clone/fetch
+- check out a protected-safe work branch
+- run Codex in the remote checkout
+- commit dirty changes
+- push the work branch
+- run cleanup hooks
 
 The expected flow is:
 
@@ -50,8 +59,11 @@ The Daytona environment must have:
 - repo credentials available to the sandbox
 - `workspaceStrategy: "git_clone"` in provider config, or a provider version that honors the adapter metadata hint
 - a project workspace with `repoUrl` metadata
+- explicit Git credentials for clone/push when the repo is private
 
 Manual connection testing is still required before migrating live agents.
+
+Do not put board/browser credentials in the sandbox. Git credentials should be scoped to clone/push for the configured repo, and Codex credentials should be supplied through the remote environment or explicit adapter env.
 
 ## Migration
 
