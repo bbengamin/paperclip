@@ -18,6 +18,24 @@ import { SchemaConfigFields, buildSchemaAdapterConfig } from "./schema-config-fi
 const uiAdapters: UIAdapterModule[] = [];
 const adaptersByType = new Map<string, UIAdapterModule>();
 
+const codexPaperclipLocalUIAdapter: UIAdapterModule = {
+  ...codexLocalUIAdapter,
+  type: "codex_paperclip_local",
+  label: "Codex (Paperclip local)",
+};
+
+const hermesPaperclipLocalUIAdapter: UIAdapterModule = {
+  ...hermesLocalUIAdapter,
+  type: "hermes_paperclip_local",
+  label: "Hermes Agent (Paperclip local)",
+};
+
+const openCodePaperclipLocalUIAdapter: UIAdapterModule = {
+  ...openCodeLocalUIAdapter,
+  type: "opencode_paperclip_local",
+  label: "OpenCode (Paperclip local)",
+};
+
 // Types registered at module load time — allowed to be overridden by
 // external adapters that ship their own ui-parser.js via the server.
 const builtinTypes = new Set<string>();
@@ -55,11 +73,14 @@ function registerBuiltInUIAdapters() {
     acpxLocalUIAdapter,
     claudeLocalUIAdapter,
     codexLocalUIAdapter,
+    codexPaperclipLocalUIAdapter,
     cursorCloudUIAdapter,
     geminiLocalUIAdapter,
     grokLocalUIAdapter,
     hermesLocalUIAdapter,
+    hermesPaperclipLocalUIAdapter,
     openCodeLocalUIAdapter,
+    openCodePaperclipLocalUIAdapter,
     piLocalUIAdapter,
     cursorLocalUIAdapter,
     openClawGatewayUIAdapter,

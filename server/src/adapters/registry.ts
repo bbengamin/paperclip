@@ -142,6 +142,9 @@ import { buildExternalAdapters } from "./plugin-loader.js";
 import { getDisabledAdapterTypes } from "../services/adapter-plugin-store.js";
 import { processAdapter } from "./process/index.js";
 import { httpAdapter } from "./http/index.js";
+import { createCodexPaperclipLocalAdapter } from "./wrappers/codex-paperclip-local.js";
+import { createHermesPaperclipLocalAdapter } from "./wrappers/hermes-paperclip-local.js";
+import { createOpenCodePaperclipLocalAdapter } from "./wrappers/opencode-paperclip-local.js";
 
 function readConfiguredCommand(config: Record<string, unknown>, fallback: string): string {
   const value = typeof config.command === "string" ? config.command.trim() : "";
@@ -499,6 +502,57 @@ const hermesLocalAdapter: ServerAdapterModule = {
   detectModel: () => detectModelFromHermes(),
 };
 
+const codexPaperclipLocalAdapter = createCodexPaperclipLocalAdapter({
+  base: codexLocalAdapter,
+  agentConfigurationDoc: `${codexAgentConfigurationDoc}
+
+Paperclip wrapper adapter: codex_paperclip_local
+
+Use this wrapper when Codex should run with Paperclip-owned runtime policy:
+- inject the run-scoped Paperclip API token into the process environment
+- preserve native Codex auth/config on SSH targets unless managed state is explicitly requested
+- use managed runtime state by default for sandbox execution
+
+Use codex_local instead when you want the generic upstream Codex adapter behavior.
+`,
+});
+
+const openCodePaperclipLocalAdapter = createOpenCodePaperclipLocalAdapter({
+  base: openCodeLocalAdapter,
+  agentConfigurationDoc: `${openCodeAgentConfigurationDoc}
+
+Paperclip wrapper adapter: opencode_paperclip_local
+
+Use this wrapper when OpenCode should run with Paperclip-owned runtime policy:
+- inject the run-scoped Paperclip API token into the process environment
+- preserve native OpenCode config/auth on SSH targets unless managed state is explicitly requested
+- use managed runtime state by default for sandbox execution
+
+Use opencode_local instead when you want the generic upstream OpenCode adapter behavior.
+`,
+});
+
+const hermesPaperclipBaseAdapter: ServerAdapterModule = {
+  ...hermesLocalAdapter,
+  execute: (ctx) => executeHermesLocal(normalizeHermesConfig(ctx)),
+  testEnvironment: (ctx) => hermesTestEnvironment(normalizeHermesConfig(ctx) as never),
+};
+
+const hermesPaperclipLocalAdapter = createHermesPaperclipLocalAdapter({
+  base: hermesPaperclipBaseAdapter,
+  agentConfigurationDoc: `${hermesAgentConfigurationDoc}
+
+Paperclip wrapper adapter: hermes_paperclip_local
+
+Use this wrapper when Hermes should run with Paperclip-owned compatibility policy:
+- inject the run-scoped Paperclip API token into the process environment
+- add Paperclip API auth guidance to custom prompts
+- preserve Hermes command normalization for older Hermes adapter config shapes
+
+Use hermes_local instead when you want the loaded Hermes package behavior without selecting the Paperclip wrapper type.
+`,
+});
+
 const adaptersByType = new Map<string, ServerAdapterModule>();
 
 // For builtin types that are overridden by an external adapter, we keep the
@@ -515,7 +569,9 @@ function registerBuiltInAdapters() {
     acpxLocalAdapter,
     claudeLocalAdapter,
     codexLocalAdapter,
+    codexPaperclipLocalAdapter,
     openCodeLocalAdapter,
+    openCodePaperclipLocalAdapter,
     piLocalAdapter,
     cursorCloudAdapter,
     cursorLocalAdapter,
@@ -523,6 +579,7 @@ function registerBuiltInAdapters() {
     grokLocalAdapter,
     openclawGatewayAdapter,
     hermesLocalAdapter,
+    hermesPaperclipLocalAdapter,
     processAdapter,
     httpAdapter,
   ]) {

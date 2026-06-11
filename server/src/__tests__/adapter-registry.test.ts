@@ -194,6 +194,37 @@ describe("server adapter registry", () => {
     expect(adapter!.supportsLocalAgentJwt).toBe(true);
   });
 
+  it("exposes Paperclip wrapper adapters without replacing native local adapters", () => {
+    const nativeCodex = findActiveServerAdapter("codex_local");
+    const nativeHermes = findActiveServerAdapter("hermes_local");
+    const nativeOpenCode = findActiveServerAdapter("opencode_local");
+    const codexWrapper = findActiveServerAdapter("codex_paperclip_local");
+    const hermesWrapper = findActiveServerAdapter("hermes_paperclip_local");
+    const openCodeWrapper = findActiveServerAdapter("opencode_paperclip_local");
+
+    expect(nativeCodex).not.toBeNull();
+    expect(nativeHermes).not.toBeNull();
+    expect(nativeOpenCode).not.toBeNull();
+    expect(codexWrapper).not.toBeNull();
+    expect(hermesWrapper).not.toBeNull();
+    expect(openCodeWrapper).not.toBeNull();
+    expect(codexWrapper).not.toBe(nativeCodex);
+    expect(hermesWrapper).not.toBe(nativeHermes);
+    expect(openCodeWrapper).not.toBe(nativeOpenCode);
+    expect(codexWrapper?.supportsInstructionsBundle).toBe(true);
+    expect(hermesWrapper?.supportsLocalAgentJwt).toBe(true);
+    expect(openCodeWrapper?.requiresMaterializedRuntimeSkills).toBe(true);
+  });
+
+  it("keeps unrelated external adapters separate from Paperclip wrapper adapters", () => {
+    registerServerAdapter(externalAdapter);
+
+    expect(requireServerAdapter("external_test")).toBe(externalAdapter);
+    expect(requireServerAdapter("codex_paperclip_local").type).toBe("codex_paperclip_local");
+    expect(requireServerAdapter("hermes_paperclip_local").type).toBe("hermes_paperclip_local");
+    expect(requireServerAdapter("opencode_paperclip_local").type).toBe("opencode_paperclip_local");
+  });
+
   it("built-in local adapters declare cheap model profile defaults where supported", async () => {
     await expect(listAdapterModelProfiles("claude_local")).resolves.toEqual([
       expect.objectContaining({

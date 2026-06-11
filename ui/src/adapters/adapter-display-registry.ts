@@ -23,6 +23,7 @@ import { HermesIcon } from "@/components/HermesIcon";
 // ---------------------------------------------------------------------------
 
 const TYPE_SUFFIXES: Record<string, string> = {
+  _paperclip_local: "Paperclip local",
   _local: "local",
   _gateway: "gateway",
 };
@@ -73,6 +74,12 @@ const adapterDisplayMap: Record<string, AdapterDisplayInfo> = {
     icon: Code,
     recommended: true,
   },
+  codex_paperclip_local: {
+    label: "Codex",
+    description: "Codex with Paperclip runtime policy",
+    icon: Code,
+    experimental: true,
+  },
   gemini_local: {
     label: "Gemini CLI",
     description: "Local Gemini agent",
@@ -88,10 +95,22 @@ const adapterDisplayMap: Record<string, AdapterDisplayInfo> = {
     description: "Local multi-provider agent",
     icon: OpenCodeLogoIcon,
   },
+  opencode_paperclip_local: {
+    label: "OpenCode",
+    description: "OpenCode with Paperclip runtime policy",
+    icon: OpenCodeLogoIcon,
+    experimental: true,
+  },
   hermes_local: {
     label: "Hermes Agent",
     description: "Local Hermes CLI agent",
     icon: HermesIcon,
+  },
+  hermes_paperclip_local: {
+    label: "Hermes Agent",
+    description: "Hermes with Paperclip compatibility policy",
+    icon: HermesIcon,
+    experimental: true,
   },
   pi_local: {
     label: "Pi",
