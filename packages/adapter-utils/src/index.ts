@@ -80,6 +80,8 @@ export type {
 export {
   deriveRemoteGitSandboxSpec,
   prepareRemoteGitSandbox,
+  redactRemoteGitSandboxSecrets,
+  validateRemoteGitSandboxSafety,
   withRemoteGitSandbox,
 } from "./remote-git-sandbox.js";
 export type {
@@ -89,6 +91,8 @@ export type {
   RemoteGitSandboxFinalizeResult,
   RemoteGitSandboxIssueContext,
   RemoteGitSandboxRunner,
+  RemoteGitSandboxSafetyPolicy,
+  RemoteGitSandboxSafetyResult,
   RemoteGitSandboxSpec,
   RemoteGitSandboxWorkspaceContext,
 } from "./remote-git-sandbox.js";

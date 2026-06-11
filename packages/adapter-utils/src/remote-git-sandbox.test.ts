@@ -3,6 +3,8 @@ import { describe, expect, it, vi } from "vitest";
 import {
   deriveRemoteGitSandboxSpec,
   prepareRemoteGitSandbox,
+  redactRemoteGitSandboxSecrets,
+  validateRemoteGitSandboxSafety,
   withRemoteGitSandbox,
   type RemoteGitSandboxRunner,
 } from "./remote-git-sandbox.js";
@@ -32,13 +34,18 @@ function fail(stderr: string): RunProcessResult {
   };
 }
 
-function createRunner(handler?: (script: string) => RunProcessResult): RemoteGitSandboxRunner & { scripts: string[] } {
+function createRunner(
+  handler?: (script: string) => RunProcessResult,
+): RemoteGitSandboxRunner & { scripts: string[]; envs: Array<Record<string, string> | undefined> } {
   const scripts: string[] = [];
+  const envs: Array<Record<string, string> | undefined> = [];
   return {
     scripts,
+    envs,
     execute: async (input) => {
       const script = input.args?.[1] ?? "";
       scripts.push(script);
+      envs.push(input.env);
       return handler?.(script) ?? ok();
     },
   };
@@ -176,5 +183,134 @@ describe("remote Git sandbox", () => {
 
     expect(cleanupHook).toHaveBeenCalledTimes(1);
     expect(runner.scripts.join("\n")).toContain("rm -rf .paperclip-runtime");
+  });
+
+  it("requires explicitly approved credentials and strips host env by default", async () => {
+    const runner = createRunner((script) => {
+      if (script === "git status --porcelain=v1") return ok("\n");
+      return ok();
+    });
+
+    await expect(
+      prepareRemoteGitSandbox({
+        runner,
+        spec: {
+          repoUrl: "https://github.com/example/repo",
+          baseRef: "main",
+          workBranch: "paperclip/RL-202",
+          remoteCwd: "/sandbox/repo",
+          setupCommand: null,
+          cleanupCommand: null,
+        },
+        safety: {
+          requiredCredentialEnv: ["GIT_AUTH_TOKEN"],
+          approvedEnv: {
+            HOME: "/Users/local",
+          },
+        },
+      }),
+    ).rejects.toThrow("missing required credential env: GIT_AUTH_TOKEN");
+
+    const sandbox = await prepareRemoteGitSandbox({
+      runner,
+      spec: {
+        repoUrl: "https://github.com/example/repo",
+        baseRef: "main",
+        workBranch: "paperclip/RL-202",
+        remoteCwd: "/sandbox/repo",
+        setupCommand: null,
+        cleanupCommand: null,
+      },
+      safety: {
+        requiredCredentialEnv: ["GIT_AUTH_TOKEN"],
+        approvedEnv: {
+          GIT_AUTH_TOKEN: "token-123456789",
+          PAPERCLIP_API_KEY: "run-key-123456789",
+          HOME: "/Users/local",
+        },
+      },
+    });
+    await sandbox.finalize();
+
+    expect(runner.envs.every((env) => env?.GIT_AUTH_TOKEN === "token-123456789")).toBe(true);
+    expect(runner.envs.every((env) => env?.PAPERCLIP_API_KEY === "run-key-123456789")).toBe(true);
+    expect(runner.envs.every((env) => env?.HOME === "/Users/local")).toBe(true);
+    expect(runner.envs.every((env) => !("PATH" in (env ?? {})))).toBe(true);
+  });
+
+  it("rejects wrong repos and protected branch push targets before running commands", async () => {
+    const spec = {
+      repoUrl: "https://github.com/example/repo",
+      baseRef: "main",
+      workBranch: "main",
+      remoteCwd: "/sandbox/repo",
+      setupCommand: null,
+      cleanupCommand: null,
+    };
+    const runner = createRunner();
+
+    expect(() =>
+      validateRemoteGitSandboxSafety({
+        spec: {
+          ...spec,
+          workBranch: "paperclip/RL-202",
+        },
+        policy: {
+          allowedRepoUrls: ["https://github.com/other/repo"],
+        },
+      }),
+    ).toThrow("repo is not allowed");
+
+    await expect(
+      prepareRemoteGitSandbox({
+        runner,
+        spec,
+      }),
+    ).rejects.toThrow("refuses to push protected branch: main");
+    expect(runner.scripts).toHaveLength(0);
+  });
+
+  it("redacts configured secrets and embedded URL credentials from surfaced errors", async () => {
+    expect(
+      redactRemoteGitSandboxSecrets("clone https://user:secret-token@example.com/repo failed", ["secret-token"]),
+    ).toBe("clone https://[redacted]@example.com/repo failed");
+
+    const runner = createRunner(() => fail("fatal: auth token token-123456789 rejected"));
+    await expect(
+      prepareRemoteGitSandbox({
+        runner,
+        spec: {
+          repoUrl: "https://user:token-123456789@example.com/repo.git",
+          baseRef: "main",
+          workBranch: "paperclip/RL-202",
+          remoteCwd: "/sandbox/repo",
+          setupCommand: null,
+          cleanupCommand: null,
+        },
+        safety: {
+          approvedEnv: {
+            GIT_AUTH_TOKEN: "token-123456789",
+          },
+        },
+      }),
+    ).rejects.toThrow("https://[redacted]@example.com/repo.git");
+    await expect(
+      prepareRemoteGitSandbox({
+        runner,
+        spec: {
+          repoUrl: "https://user:token-123456789@example.com/repo.git",
+          baseRef: "main",
+          workBranch: "paperclip/RL-202",
+          remoteCwd: "/sandbox/repo",
+          setupCommand: null,
+          cleanupCommand: null,
+        },
+        safety: {
+          approvedEnv: {
+            GIT_AUTH_TOKEN: "token-123456789",
+          },
+        },
+      }),
+    ).rejects.not.toThrow("token-123456789");
   });
 });

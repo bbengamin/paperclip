@@ -170,6 +170,14 @@ task role), `AWS_PROFILE` / SSO / shared config for local runs, an orchestrator
 secret store that boots the server, or short-lived shell credentials for local
 development. Do not paste long-lived API keys into the vault config.
 
+Remote Git sandbox adapters follow the same custody rule. Git clone/push
+credentials and runtime credentials for hosted sandboxes must be injected by the
+adapter from explicit, approved runtime env or deployment secret material. They
+must not be copied from board-user browser sessions, broad host env dumps, or
+Paperclip company secret provider credentials. Remote adapters should require
+named credential env vars, validate the target repo and work branch before
+cloning or pushing, and redact those values from sandbox command errors.
+
 ### Vault Status
 
 Each vault carries a status that drives what the runtime can do with it:

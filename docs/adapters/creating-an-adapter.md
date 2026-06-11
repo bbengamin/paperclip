@@ -268,12 +268,22 @@ Use this layer only for explicit remote Git adapters, such as a future Codex Rem
 The supported flow:
 
 - Derive the repo URL, base ref, work branch, and sandbox cwd with `deriveRemoteGitSandboxSpec()`.
-- Prepare the sandbox repo with `prepareRemoteGitSandbox()`, which clones or fetches, checks out the work branch, and runs an optional setup command.
+- Pass a `safety` policy that lists allowed repo URLs, protected branch names, required credential env vars, and the exact approved env values that may enter the sandbox.
+- Prepare the sandbox repo with `prepareRemoteGitSandbox()`, which validates the safety policy, clones or fetches, checks out the work branch, and runs an optional setup command.
 - Run the adapter inside `sandbox.spec.remoteCwd`.
 - Finalize with `sandbox.finalize()`, which reads `git status`, commits dirty work when present, and pushes the work branch when enabled.
 - Wrap execution in `withRemoteGitSandbox()` when cleanup commands or provider cleanup hooks must run even after agent, commit, or push failures.
 
 This layer does not include Daytona or any other provider API. Provider-specific wrappers should pass a generic runner that can execute shell commands in the sandbox and cleanup hooks that stop or release the sandbox lease.
+
+Credential and safety rules:
+
+- Do not copy host env wholesale into the sandbox. Build sandbox env from explicit approved values only.
+- Git clone/push credentials must be scoped to the intended repo and provided through named env vars required by the adapter's safety policy.
+- Paperclip writes from the sandbox must use agent/run-scoped credentials, never board-user browser/session credentials.
+- Pushes to protected/default branches are rejected by default. Remote adapters should push issue work branches and let review/merge happen elsewhere.
+- If repo auth, push target, or runtime auth is ambiguous, stop the run and surface the reason. Do not fall back to local credentials.
+- Redact configured secret values and embedded URL credentials from command errors before surfacing them in run output.
 
 ## Skills Injection
 

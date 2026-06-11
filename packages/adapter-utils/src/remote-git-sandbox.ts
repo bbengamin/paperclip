@@ -63,8 +63,22 @@ export interface RemoteGitSandboxCleanupHook {
   (spec: RemoteGitSandboxSpec): Promise<void>;
 }
 
+export interface RemoteGitSandboxSafetyPolicy {
+  allowedRepoUrls?: string[];
+  protectedBranches?: string[];
+  requiredCredentialEnv?: string[];
+  approvedEnv?: Record<string, string | null | undefined>;
+  redactedSecrets?: string[];
+}
+
+export interface RemoteGitSandboxSafetyResult {
+  env: Record<string, string>;
+  redactedSecrets: string[];
+}
+
 const DEFAULT_BASE_REF = "main";
 const DEFAULT_WORK_BRANCH_PREFIX = "paperclip";
+const DEFAULT_PROTECTED_BRANCHES = ["main", "master", "develop", "development", "trunk", "release"];
 
 function shellQuote(value: string) {
   return `'${value.replace(/'/g, `'"'"'`)}'`;
@@ -91,6 +105,79 @@ function sanitizeBranchPart(value: string): string {
 
 function sanitizePathPart(value: string): string {
   return sanitizeBranchPart(value).replace(/\//g, "-") || "workspace";
+}
+
+function normalizeRepoUrlForComparison(value: string): string {
+  return value
+    .trim()
+    .replace(/\/\/[^/@]+@/g, "//")
+    .replace(/\.git$/i, "")
+    .replace(/\/+$/g, "")
+    .toLowerCase();
+}
+
+function normalizeBranchForComparison(value: string): string {
+  return value.trim().replace(/^refs\/heads\//, "").toLowerCase();
+}
+
+function isProtectedBranch(branch: string, protectedBranches: string[]): boolean {
+  const normalizedBranch = normalizeBranchForComparison(branch);
+  return protectedBranches.some((protectedBranch) => {
+    const normalizedProtectedBranch = normalizeBranchForComparison(protectedBranch);
+    return normalizedBranch === normalizedProtectedBranch || normalizedBranch.startsWith(`${normalizedProtectedBranch}/`);
+  });
+}
+
+export function redactRemoteGitSandboxSecrets(input: string, secrets: string[] = []): string {
+  let redacted = input.replace(/(https?:\/\/)([^/\s:@]+):([^@\s/]+)@/gi, "$1[redacted]@");
+  for (const secret of secrets) {
+    if (!secret) continue;
+    redacted = redacted.split(secret).join("[redacted]");
+  }
+  return redacted;
+}
+
+export function validateRemoteGitSandboxSafety(input: {
+  spec: RemoteGitSandboxSpec;
+  policy?: RemoteGitSandboxSafetyPolicy | null;
+}): RemoteGitSandboxSafetyResult {
+  const policy = input.policy ?? {};
+  const approvedEnv = Object.fromEntries(
+    Object.entries(policy.approvedEnv ?? {}).filter((entry): entry is [string, string] => {
+      const [key, value] = entry;
+      return /^[A-Z_][A-Z0-9_]*$/i.test(key) && typeof value === "string" && value.length > 0;
+    }),
+  );
+
+  const redactedSecrets = [
+    ...Object.values(approvedEnv).filter((value) => value.length >= 8),
+    ...(policy.redactedSecrets ?? []).filter((value) => value.length > 0),
+  ];
+
+  const allowedRepoUrls = policy.allowedRepoUrls ?? [];
+  if (allowedRepoUrls.length > 0) {
+    const normalizedActual = normalizeRepoUrlForComparison(input.spec.repoUrl);
+    const repoMatches = allowedRepoUrls.some((repoUrl) => normalizeRepoUrlForComparison(repoUrl) === normalizedActual);
+    if (!repoMatches) {
+      throw new Error(`Remote Git sandbox repo is not allowed: ${redactRemoteGitSandboxSecrets(input.spec.repoUrl, redactedSecrets)}`);
+    }
+  }
+
+  const protectedBranches = policy.protectedBranches ?? DEFAULT_PROTECTED_BRANCHES;
+  if (isProtectedBranch(input.spec.workBranch, protectedBranches)) {
+    throw new Error(`Remote Git sandbox refuses to push protected branch: ${input.spec.workBranch}`);
+  }
+
+  for (const envName of policy.requiredCredentialEnv ?? []) {
+    if (!approvedEnv[envName]) {
+      throw new Error(`Remote Git sandbox missing required credential env: ${envName}`);
+    }
+  }
+
+  return {
+    env: approvedEnv,
+    redactedSecrets,
+  };
 }
 
 export function deriveRemoteGitSandboxSpec(input: {
@@ -138,11 +225,12 @@ export function deriveRemoteGitSandboxSpec(input: {
   };
 }
 
-function requireSuccess(result: RunProcessResult, action: string): RunProcessResult {
+function requireSuccess(result: RunProcessResult, action: string, redactedSecrets: string[] = []): RunProcessResult {
   if (result.exitCode === 0 && !result.timedOut) return result;
-  const stderr = result.stderr.trim();
+  const redactedAction = redactRemoteGitSandboxSecrets(action, redactedSecrets);
+  const stderr = redactRemoteGitSandboxSecrets(result.stderr.trim(), redactedSecrets);
   const detail = stderr.length > 0 ? `: ${stderr}` : "";
-  throw new Error(`${action} failed with exit code ${result.exitCode ?? "null"}${detail}`);
+  throw new Error(`${redactedAction} failed with exit code ${result.exitCode ?? "null"}${detail}`);
 }
 
 export async function prepareRemoteGitSandbox(input: {
@@ -151,18 +239,25 @@ export async function prepareRemoteGitSandbox(input: {
   shellCommand?: "bash" | "sh";
   timeoutMs?: number;
   cleanupHooks?: RemoteGitSandboxCleanupHook[];
+  safety?: RemoteGitSandboxSafetyPolicy | null;
 }): Promise<PreparedRemoteGitSandbox> {
   const shellCommand = input.shellCommand ?? "bash";
   const timeoutMs = input.timeoutMs ?? 300_000;
+  const safety = validateRemoteGitSandboxSafety({
+    spec: input.spec,
+    policy: input.safety,
+  });
   const runShell = async (script: string, cwd = "/", runTimeoutMs = timeoutMs) =>
     requireSuccess(
       await input.runner.execute({
         command: shellCommand,
         args: shArgs(script),
         cwd,
+        env: safety.env,
         timeoutMs: runTimeoutMs,
       }),
       script,
+      safety.redactedSecrets,
     );
 
   const gitDir = `${input.spec.remoteCwd.replace(/\/+$/g, "")}/.git`;
@@ -201,6 +296,7 @@ export async function prepareRemoteGitSandbox(input: {
       command: shellCommand,
       args: shArgs(command),
       cwd: input.spec.remoteCwd,
+      env: safety.env,
       timeoutMs: options.timeoutMs ?? timeoutMs,
     });
 
@@ -275,6 +371,7 @@ export async function withRemoteGitSandbox<T>(input: {
   shellCommand?: "bash" | "sh";
   timeoutMs?: number;
   cleanupHooks?: RemoteGitSandboxCleanupHook[];
+  safety?: RemoteGitSandboxSafetyPolicy | null;
   work: (sandbox: PreparedRemoteGitSandbox) => Promise<T>;
 }): Promise<T> {
   const sandbox = await prepareRemoteGitSandbox(input);
