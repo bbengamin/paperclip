@@ -61,6 +61,22 @@ export {
   redactCommandText,
 } from "./command-redaction.js";
 export { buildSandboxNpmInstallCommand } from "./sandbox-install-command.js";
+export {
+  PAPERCLIP_API_KEY_ENV,
+  PAPERCLIP_RUN_ID_ENV,
+  DEFAULT_PAPERCLIP_API_SAFETY_PROMPT,
+  applyPaperclipRuntimeEnv,
+  composePaperclipPromptGuard,
+  resolvePaperclipRuntimeStateStrategy,
+} from "./paperclip-wrapper.js";
+export type {
+  PaperclipPromptGuardMode,
+  PaperclipRuntimeEnvInput,
+  PaperclipPromptGuardInput,
+  PaperclipRuntimeStateStrategy,
+  PaperclipRuntimeStateStrategyInput,
+  PaperclipRuntimeStateStrategyResult,
+} from "./paperclip-wrapper.js";
 export { inferOpenAiCompatibleBiller } from "./billing.js";
 // Keep the root adapter-utils entry browser-safe because the UI imports it.
 // The sandbox callback bridge stays available via its dedicated subpath export.
