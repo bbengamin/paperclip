@@ -3,7 +3,7 @@ FROM node:lts-trixie-slim AS base
 ARG USER_UID=1000
 ARG USER_GID=1000
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates gosu curl gh git wget ripgrep python3 \
+  && apt-get install -y --no-install-recommends ca-certificates gosu curl gh git wget ripgrep python3 bubblewrap \
   && rm -rf /var/lib/apt/lists/* \
   && corepack enable
 
@@ -59,6 +59,7 @@ ARG USER_UID=1000
 ARG USER_GID=1000
 WORKDIR /app
 COPY --chown=node:node --from=build /app /app
+COPY --from=ghcr.io/astral-sh/uv:0.11.21 /uv /uvx /usr/local/bin/
 RUN npm install --global --omit=dev @anthropic-ai/claude-code@latest @openai/codex@latest opencode-ai @google/gemini-cli@latest \
   && apt-get update \
   && apt-get install -y --no-install-recommends openssh-client jq \
@@ -84,6 +85,7 @@ ENV NODE_ENV=production \
   PAPERCLIP_DEPLOYMENT_EXPOSURE=private \
   PAPERCLIP_DOCKER_RUNTIME=rootless \
   OPENCODE_ALLOW_ALL_MODELS=true \
+  UV_LINK_MODE=copy \
   GEMINI_SANDBOX=false
 
 VOLUME ["/paperclip"]
