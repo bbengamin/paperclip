@@ -37,6 +37,7 @@ interface SpawnTarget {
   args: string[];
   cwd?: string;
   cleanup?: () => Promise<void>;
+  windowsVerbatimArguments?: boolean;
 }
 
 type RemoteExecutionSpec = SshRemoteExecutionSpec;
@@ -1293,10 +1294,11 @@ async function resolveSpawnTarget(
     // Always use cmd.exe for .cmd/.bat wrappers. Some environments override
     // ComSpec to PowerShell, which breaks cmd-specific flags like /d /s /c.
     const shell = resolveWindowsCmdShell(env);
-    const commandLine = [quoteForCmd(executable), ...args.map(quoteForCmd)].join(" ");
+    const commandLine = ["call", quoteForCmd(executable), ...args.map(quoteForCmd)].join(" ");
     return {
       command: shell,
       args: ["/d", "/s", "/c", commandLine],
+      windowsVerbatimArguments: true,
     };
   }
 
@@ -2122,6 +2124,7 @@ export async function runChildProcess(
           env: mergedEnv,
           detached: process.platform !== "win32",
           shell: false,
+          windowsVerbatimArguments: target.windowsVerbatimArguments,
           stdio: [opts.stdin != null ? "pipe" : "ignore", "pipe", "pipe"],
         }) as ChildProcessWithEvents;
         const startedAt = new Date().toISOString();

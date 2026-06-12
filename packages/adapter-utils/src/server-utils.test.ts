@@ -147,6 +147,43 @@ describe("sanitizeSshRemoteEnv", () => {
   });
 });
 
+describe("runChildProcess", () => {
+  it.runIf(process.platform === "win32")("runs Windows .cmd wrappers from paths with spaces", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip cmd-wrapper-"));
+    try {
+      const binDir = path.join(root, "Program Files", "nodejs");
+      await fs.mkdir(binDir, { recursive: true });
+      const wrapper = path.join(binDir, "fake-tool.cmd");
+      await fs.writeFile(
+        wrapper,
+        [
+          "@echo off",
+          "echo fake-tool:%1:%2",
+        ].join("\r\n"),
+        "utf8",
+      );
+
+      const result = await runChildProcess(
+        "cmd-wrapper-space-test",
+        wrapper,
+        ["models", "ok value"],
+        {
+          cwd: root,
+          env: process.env as Record<string, string>,
+          timeoutSec: 5,
+          graceSec: 1,
+          onLog: async () => {},
+        },
+      );
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain('fake-tool:models:"ok value"');
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("materializePaperclipSkillCopy", () => {
   it("refuses to materialize into an ancestor of the source", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-skill-copy-"));
