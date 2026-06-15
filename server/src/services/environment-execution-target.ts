@@ -35,6 +35,7 @@ export async function resolveEnvironmentExecutionTarget(input: {
   if (input.environment.driver === "sandbox") {
     if (
       input.adapterType !== "acpx_local" &&
+      input.adapterType !== "codex_remote" &&
       input.adapterType !== "codex_local" &&
       input.adapterType !== "claude_local" &&
       input.adapterType !== "gemini_local" &&

@@ -133,6 +133,48 @@ describe("resolveEnvironmentExecutionTarget", () => {
     });
   });
 
+  it("resolves Codex Remote against sandbox execution targets", async () => {
+    mockResolveEnvironmentDriverConfigForRuntime.mockResolvedValue({
+      driver: "sandbox",
+      config: {
+        provider: "daytona",
+        reuseLease: false,
+        timeoutMs: 30_000,
+      },
+    });
+
+    const target = await resolveEnvironmentExecutionTarget({
+      db: {} as never,
+      companyId: "company-1",
+      adapterType: "codex_remote",
+      environment: {
+        id: "env-daytona-1",
+        driver: "sandbox",
+        config: {
+          provider: "daytona",
+        },
+      },
+      leaseId: "lease-daytona-1",
+      leaseMetadata: {
+        remoteCwd: "/workspaces/paperclip",
+        shellCommand: "bash",
+      },
+      lease: null,
+      environmentRuntime: null,
+    });
+
+    expect(target).toMatchObject({
+      kind: "remote",
+      transport: "sandbox",
+      providerKey: "daytona",
+      remoteCwd: "/workspaces/paperclip",
+      leaseId: "lease-daytona-1",
+      environmentId: "env-daytona-1",
+      shellCommand: "bash",
+      timeoutMs: 30_000,
+    });
+  });
+
   it("resolves SSH execution targets in bridge mode", async () => {
     mockResolveEnvironmentDriverConfigForRuntime.mockResolvedValue({
       driver: "ssh",
