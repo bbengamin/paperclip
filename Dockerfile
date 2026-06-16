@@ -88,7 +88,6 @@ ENV NODE_ENV=production \
   UV_LINK_MODE=copy \
   GEMINI_SANDBOX=false
 
-VOLUME ["/paperclip"]
 EXPOSE 3100
 
 ENTRYPOINT ["docker-entrypoint.sh"]
