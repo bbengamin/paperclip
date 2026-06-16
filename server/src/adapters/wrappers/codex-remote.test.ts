@@ -112,7 +112,7 @@ function createBaseAdapter(execute = vi.fn<ServerAdapterModule["execute"]>(async
 }
 
 describe("codex_remote wrapper", () => {
-  it("defaults workspace realization to Git clone without dropping existing config", () => {
+  it("defaults workspace realization to Git clone and a fail-fast timeout without dropping existing config", () => {
     expect(applyCodexRemoteDefaults({
       model: "gpt-5.3-codex",
       workspaceRealization: {
@@ -120,11 +120,18 @@ describe("codex_remote wrapper", () => {
       },
     })).toEqual({
       model: "gpt-5.3-codex",
+      timeoutSec: 600,
       workspaceRealization: {
         workspaceStrategy: "git_clone",
         workBranch: "paperclip/RL-203",
       },
     });
+  });
+
+  it("preserves an explicit timeoutSec instead of the fail-fast default", () => {
+    expect(applyCodexRemoteDefaults({ timeoutSec: 1800 })).toMatchObject({ timeoutSec: 1800 });
+    // A non-positive timeout falls back to the default.
+    expect(applyCodexRemoteDefaults({ timeoutSec: 0 })).toMatchObject({ timeoutSec: 600 });
   });
 
   it("prepares Git workspace, runs Codex remotely, commits, and pushes", async () => {

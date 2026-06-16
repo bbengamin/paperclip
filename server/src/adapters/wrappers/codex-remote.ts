@@ -17,6 +17,13 @@ const DEFAULT_WORKSPACE_REALIZATION = {
   workspaceStrategy: "git_clone",
 } as const;
 
+// Remote sandbox runs have no natural process supervisor, so an un-capped run
+// (timeoutSec = 0) only ends when the host RPC ceiling (15 min) fires, which
+// surfaces as an opaque "environmentExecute timed out after 900000ms". Default
+// to a sane cap so a stuck/wandering run fails fast with a clear "Timed out
+// after Ns" instead. Agents can still override timeoutSec explicitly.
+const DEFAULT_REMOTE_TIMEOUT_SEC = 600;
+
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -89,8 +96,11 @@ function failureResult(error: unknown, prefix: string): AdapterExecutionResult {
 }
 
 export function applyCodexRemoteDefaults(config: Record<string, unknown>): Record<string, unknown> {
+  const hasExplicitTimeout =
+    typeof config.timeoutSec === "number" && Number.isFinite(config.timeoutSec) && config.timeoutSec > 0;
   return {
     ...config,
+    timeoutSec: hasExplicitTimeout ? config.timeoutSec : DEFAULT_REMOTE_TIMEOUT_SEC,
     workspaceRealization: {
       ...DEFAULT_WORKSPACE_REALIZATION,
       ...asRecord(config.workspaceRealization),
