@@ -368,11 +368,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   );
   const graceSec = asNumber(config.graceSec, 20);
   let effectiveExecutionCwd = adapterExecutionTargetRemoteCwd(executionTarget, cwd);
-  const preparedExecutionTargetRuntime = executionTargetIsRemote && !providerRealizedRemoteGitWorkspace
+  const preparedExecutionTargetRuntime = executionTargetIsRemote
     ? await (async () => {
         await onLog(
           "stdout",
-          `[paperclip] Syncing workspace and CODEX_HOME to ${describeAdapterExecutionTarget(executionTarget)}.\n`,
+          providerRealizedRemoteGitWorkspace
+            ? `[paperclip] Syncing CODEX_HOME to ${describeAdapterExecutionTarget(executionTarget)}; using provider-realized remote Git workspace at ${effectiveExecutionCwd} (skipping workspace archive sync).\n`
+            : `[paperclip] Syncing workspace and CODEX_HOME to ${describeAdapterExecutionTarget(executionTarget)}.\n`,
         );
         return await prepareAdapterExecutionTargetRuntime({
           runId,
@@ -380,6 +382,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           adapterKey: "codex",
           timeoutSec,
           workspaceLocalDir: cwd,
+          // For a provider-realized remote Git workspace, the repo is already
+          // cloned at the remote cwd. Anchor the runtime (and thus the synced
+          // CODEX_HOME asset) there without overwriting the clone.
+          ...(providerRealizedRemoteGitWorkspace
+            ? { workspaceRemoteDir: effectiveExecutionCwd, syncWorkspace: false }
+            : {}),
           installCommand: SANDBOX_INSTALL_COMMAND,
           detectCommand: command,
           assets: [
@@ -392,12 +400,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         });
       })()
     : null;
-  if (providerRealizedRemoteGitWorkspace) {
-    await onLog(
-      "stdout",
-      `[paperclip] Using provider-realized remote Git workspace at ${effectiveExecutionCwd}; skipping workspace archive sync.\n`,
-    );
-  }
   if (preparedExecutionTargetRuntime?.workspaceRemoteDir) {
     effectiveExecutionCwd = preparedExecutionTargetRuntime.workspaceRemoteDir;
   }
@@ -408,7 +410,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     ? () => preparedExecutionTargetRuntime.restoreWorkspace()
     : null;
   let paperclipBridge: Awaited<ReturnType<typeof startAdapterExecutionTargetPaperclipBridge>> = null;
-  const remoteCodexHome = executionTargetIsRemote && !providerRealizedRemoteGitWorkspace
+  const remoteCodexHome = executionTargetIsRemote
     ? preparedExecutionTargetRuntime?.assetDirs.home ??
       path.posix.join(effectiveExecutionCwd, ".paperclip-runtime", "codex", "home")
     : null;
@@ -490,11 +492,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   if (runtimePrimaryUrl) {
     env.PAPERCLIP_RUNTIME_PRIMARY_URL = runtimePrimaryUrl;
   }
-  if (!providerRealizedRemoteGitWorkspace || !executionTargetIsRemote) {
-    env.CODEX_HOME = remoteCodexHome ?? effectiveCodexHome;
-  } else if (typeof envConfig.CODEX_HOME !== "string" || envConfig.CODEX_HOME.trim().length === 0) {
-    delete env.CODEX_HOME;
-  }
+  // Point Codex at the synced remote home (which carries config.toml — including
+  // the model_provider/base_url and any bearer token — plus auth.json) so a
+  // provider-realized remote Git sandbox uses the configured provider instead of
+  // falling back to the default api.openai.com endpoint. `remoteCodexHome` is the
+  // remote location of the synced `effectiveCodexHome` (which already reflects an
+  // explicit CODEX_HOME override), so this remapping preserves configured homes.
+  env.CODEX_HOME = remoteCodexHome ?? effectiveCodexHome;
   if (!hasExplicitApiKey && authToken) {
     env.PAPERCLIP_API_KEY = authToken;
   }

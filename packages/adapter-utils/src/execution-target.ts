@@ -930,6 +930,8 @@ export async function prepareAdapterExecutionTargetRuntime(input: {
   installCommand?: string | null;
   /** When provided alongside `installCommand`, skip the install if the binary is already on PATH. */
   detectCommand?: string | null;
+  /** When false, only sync `assets`; leave the remote workspace untouched (provider-realized workspaces). */
+  syncWorkspace?: boolean;
 }): Promise<PreparedAdapterExecutionTargetRuntime> {
   const target = input.target ?? { kind: "local" as const };
   if (target.kind === "local") {
@@ -980,6 +982,7 @@ export async function prepareAdapterExecutionTargetRuntime(input: {
     assets: input.assets,
     installCommand: input.installCommand,
     detectCommand: input.detectCommand,
+    syncWorkspace: input.syncWorkspace,
   });
   return {
     target,

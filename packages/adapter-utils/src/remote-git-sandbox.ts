@@ -36,6 +36,8 @@ export interface RemoteGitSandboxSpec {
   remoteCwd: string;
   setupCommand: string | null;
   cleanupCommand: string | null;
+  committerName?: string | null;
+  committerEmail?: string | null;
 }
 
 export interface PreparedRemoteGitSandbox {
@@ -77,6 +79,8 @@ export interface RemoteGitSandboxSafetyResult {
 }
 
 const DEFAULT_BASE_REF = "main";
+const DEFAULT_COMMITTER_NAME = "Paperclip Agent";
+const DEFAULT_COMMITTER_EMAIL = "paperclip-agent@users.noreply.github.com";
 const DEFAULT_WORK_BRANCH_PREFIX = "paperclip";
 const DEFAULT_PROTECTED_BRANCHES = ["main", "master", "develop", "development", "trunk", "release"];
 
@@ -187,6 +191,8 @@ export function deriveRemoteGitSandboxSpec(input: {
   remoteCwd?: string | null;
   workBranch?: string | null;
   workBranchPrefix?: string | null;
+  committerName?: string | null;
+  committerEmail?: string | null;
 }): RemoteGitSandboxSpec {
   const repoUrl = trimOrNull(input.workspace.repoUrl);
   if (!repoUrl) {
@@ -222,6 +228,8 @@ export function deriveRemoteGitSandboxSpec(input: {
     remoteCwd,
     setupCommand: trimOrNull(input.workspace.setupCommand),
     cleanupCommand: trimOrNull(input.workspace.cleanupCommand),
+    committerName: trimOrNull(input.committerName) ?? DEFAULT_COMMITTER_NAME,
+    committerEmail: trimOrNull(input.committerEmail) ?? DEFAULT_COMMITTER_EMAIL,
   };
 }
 
@@ -283,6 +291,32 @@ export async function prepareRemoteGitSandbox(input: {
       "else",
       `  git checkout -B ${shellQuote(input.spec.workBranch)} FETCH_HEAD`,
       "fi",
+    ].join("\n"),
+    input.spec.remoteCwd,
+  );
+
+  // Keep the Paperclip runtime overlay out of git. The bridge and the synced
+  // CODEX_HOME (auth.json, config.toml — which can hold provider bearer tokens)
+  // live under `<repo>/.paperclip-runtime`. Without this local exclude, the
+  // finalize step's `git add -A` would stage and push those secrets to the
+  // remote. Using `.git/info/exclude` avoids mutating the repo's tracked files.
+  await runShell(
+    [
+      `mkdir -p ${shellQuote(`${gitDir}/info`)}`,
+      `grep -qxF '/.paperclip-runtime/' ${shellQuote(`${gitDir}/info/exclude`)} 2>/dev/null ` +
+        `|| printf '%s\\n' '/.paperclip-runtime/' >> ${shellQuote(`${gitDir}/info/exclude`)}`,
+    ].join("\n"),
+    input.spec.remoteCwd,
+  );
+
+  // Set a repo-local git identity. A fresh sandbox has no global git config, so
+  // `git commit` aborts with "Author identity unknown" — which silently fails
+  // the finalize step (and any commit the agent makes) even after the task work
+  // is done. Scoped to this repo so it never touches global config.
+  await runShell(
+    [
+      `git config user.email ${shellQuote(trimOrNull(input.spec.committerEmail) ?? DEFAULT_COMMITTER_EMAIL)}`,
+      `git config user.name ${shellQuote(trimOrNull(input.spec.committerName) ?? DEFAULT_COMMITTER_NAME)}`,
     ].join("\n"),
     input.spec.remoteCwd,
   );

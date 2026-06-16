@@ -65,29 +65,68 @@ async function createExpectedSymlink(target: string, source: string): Promise<vo
   }
 }
 
-async function ensureSymlink(target: string, source: string): Promise<void> {
+function isSymlinkPermissionError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException).code;
+  return code === "EPERM" || code === "EACCES";
+}
+
+async function ensureSymlinkOrCopy(target: string, source: string): Promise<"symlink" | "copy"> {
   const existing = await fs.lstat(target).catch(() => null);
   if (!existing) {
     await ensureParentDir(target);
-    await createExpectedSymlink(target, source);
-    return;
+    try {
+      await createExpectedSymlink(target, source);
+      return "symlink";
+    } catch (error) {
+      if (!isSymlinkPermissionError(error)) throw error;
+      await fs.copyFile(source, target);
+      return "copy";
+    }
   }
 
   if (!existing.isSymbolicLink()) {
-    return;
+    return "copy";
   }
 
-  if (await isExpectedSymlink(target, source)) return;
+  if (await isExpectedSymlink(target, source)) return "symlink";
 
   await fs.unlink(target);
-  await createExpectedSymlink(target, source);
+  try {
+    await createExpectedSymlink(target, source);
+    return "symlink";
+  } catch (error) {
+    if (!isSymlinkPermissionError(error)) throw error;
+    await fs.copyFile(source, target);
+    return "copy";
+  }
 }
 
-async function ensureCopiedFile(target: string, source: string): Promise<void> {
+async function filesHaveSameContent(target: string, source: string): Promise<boolean> {
+  const [targetBuf, sourceBuf] = await Promise.all([
+    fs.readFile(target).catch(() => null),
+    fs.readFile(source).catch(() => null),
+  ]);
+  if (!targetBuf || !sourceBuf) return false;
+  return targetBuf.equals(sourceBuf);
+}
+
+/**
+ * Copies a shared Codex config file (e.g. `config.toml`) into the managed home,
+ * refreshing it whenever the source content changes. The managed copy is purely
+ * a mirror of the shared file — nothing else writes to it — so keeping it in
+ * sync prevents a stale config (e.g. an outdated provider `base_url`, bearer
+ * token, or `requires_openai_auth` flag) from being shipped into the sandbox
+ * after the host config is edited.
+ */
+async function ensureCopiedFile(target: string, source: string): Promise<boolean> {
   const existing = await fs.lstat(target).catch(() => null);
-  if (existing) return;
+  if (existing && !existing.isSymbolicLink() && (await filesHaveSameContent(target, source))) {
+    return false;
+  }
   await ensureParentDir(target);
+  await fs.rm(target, { force: true });
   await fs.copyFile(source, target);
+  return true;
 }
 
 /**
@@ -130,21 +169,26 @@ export async function prepareManagedCodexHome(
   }
 
   if (seedFromShared) {
+    let copiedSharedAuth = false;
     for (const name of SYMLINKED_SHARED_FILES) {
       const source = path.join(sourceHome, name);
       if (!(await pathExists(source))) continue;
-      await ensureSymlink(path.join(targetHome, name), source);
+      const mode = await ensureSymlinkOrCopy(path.join(targetHome, name), source);
+      copiedSharedAuth ||= mode === "copy";
     }
 
+    const refreshedConfigFiles: string[] = [];
     for (const name of COPIED_SHARED_FILES) {
       const source = path.join(sourceHome, name);
       if (!(await pathExists(source))) continue;
-      await ensureCopiedFile(path.join(targetHome, name), source);
+      if (await ensureCopiedFile(path.join(targetHome, name), source)) {
+        refreshedConfigFiles.push(name);
+      }
     }
 
     await onLog(
       "stdout",
-      `[paperclip] Using ${isWorktreeMode(env) ? "worktree-isolated" : "Paperclip-managed"} Codex home "${targetHome}" (seeded from "${sourceHome}").\n`,
+      `[paperclip] Using ${isWorktreeMode(env) ? "worktree-isolated" : "Paperclip-managed"} Codex home "${targetHome}" (seeded from "${sourceHome}"${copiedSharedAuth ? "; copied auth.json because symlinks are unavailable" : ""}${refreshedConfigFiles.length > 0 ? `; refreshed ${refreshedConfigFiles.join(", ")} from shared config` : ""}).\n`,
     );
   }
 

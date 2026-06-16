@@ -9,6 +9,9 @@ import {
 import { preferredShellForSandbox, shellCommandArgs } from "./sandbox-shell.js";
 import type { RunProcessResult } from "./server-utils.js";
 
+const SANDBOX_EXEC_CHANNEL_ENV = "PAPERCLIP_SANDBOX_EXEC_CHANNEL";
+const SANDBOX_EXEC_CHANNEL_BRIDGE = "bridge";
+
 export interface CommandManagedRuntimeRunner {
   execute(input: {
     command: string;
@@ -67,6 +70,9 @@ export function createCommandManagedRuntimeClient(input: {
       command: shellCommand,
       args: shellCommandArgs(script),
       cwd: input.commandCwd,
+      env: {
+        [SANDBOX_EXEC_CHANNEL_ENV]: SANDBOX_EXEC_CHANNEL_BRIDGE,
+      },
       stdin: opts.stdin,
       timeoutMs: opts.timeoutMs ?? input.timeoutMs,
     });
@@ -146,6 +152,8 @@ export async function prepareCommandManagedRuntime(input: {
   installCommand?: string | null;
   /** When provided alongside `installCommand`, skip the install if `command -v <detectCommand>` succeeds. */
   detectCommand?: string | null;
+  /** When false, only sync `assets`; leave the remote workspace untouched. */
+  syncWorkspace?: boolean;
 }): Promise<PreparedSandboxManagedRuntime> {
   const timeoutMs = input.spec.timeoutMs && input.spec.timeoutMs > 0 ? input.spec.timeoutMs : 300_000;
   const workspaceRemoteDir = input.workspaceRemoteDir ?? input.spec.remoteCwd;
@@ -193,6 +201,7 @@ export async function prepareCommandManagedRuntime(input: {
           workspaceExclude: mergeRuntimeExcludes(input.workspaceExclude),
           preserveAbsentOnRestore: input.preserveAbsentOnRestore,
           assets: input.assets,
+          syncWorkspace: input.syncWorkspace,
         });
       }
     }
@@ -227,5 +236,6 @@ export async function prepareCommandManagedRuntime(input: {
     workspaceExclude: mergeRuntimeExcludes(input.workspaceExclude),
     preserveAbsentOnRestore: input.preserveAbsentOnRestore,
     assets: input.assets,
+    syncWorkspace: input.syncWorkspace,
   });
 }

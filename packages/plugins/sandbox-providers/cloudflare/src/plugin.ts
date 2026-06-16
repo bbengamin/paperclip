@@ -98,12 +98,26 @@ function resolveExecuteSession(
   };
 }
 
-function sanitizeExecuteEnv(env: Record<string, string> | undefined) {
-  if (!env || !(SANDBOX_EXEC_CHANNEL_ENV in env)) {
-    return env;
+export function isValidSandboxEnvKey(key: string): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(key);
+}
+
+export function sanitizeExecuteEnv(env: Record<string, string> | undefined) {
+  if (!env) return env;
+  const nextEnv: Record<string, string> = {};
+  for (const [key, value] of Object.entries(env)) {
+    // Strip the internal channel marker — it controls host-side routing only
+    // and must never reach the sandbox.
+    if (key === SANDBOX_EXEC_CHANNEL_ENV) continue;
+    // Drop keys that are not valid POSIX shell identifiers. Windows hosts
+    // expose variables like `CommonProgramFiles(x86)` and `ProgramFiles(x86)`
+    // whose names contain characters that are illegal in a Linux sandbox shell.
+    // Forwarding them makes the sandbox reject the entire exec with
+    // "Invalid sandbox environment variable key", so we silently omit them —
+    // they are meaningless inside the Linux container anyway.
+    if (!isValidSandboxEnvKey(key)) continue;
+    nextEnv[key] = value;
   }
-  const nextEnv = { ...env };
-  delete nextEnv[SANDBOX_EXEC_CHANNEL_ENV];
   return nextEnv;
 }
 

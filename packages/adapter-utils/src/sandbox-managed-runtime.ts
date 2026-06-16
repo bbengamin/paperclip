@@ -119,8 +119,9 @@ async function withTempDir<T>(prefix: string, fn: (dir: string) => Promise<T>): 
   }
 }
 
-async function execTar(args: string[]): Promise<void> {
+async function execTar(args: string[], options: { cwd?: string } = {}): Promise<void> {
   await execFile("tar", args, {
+    cwd: options.cwd,
     env: {
       ...process.env,
       COPYFILE_DISABLE: "1",
@@ -146,13 +147,16 @@ async function createTarballFromDirectory(input: {
     // additionally suppresses the inline PAX xattr entries.
     "--no-xattrs",
     ...(input.followSymlinks ? ["-h"] : []),
+    // Pass the archive as a basename with cwd set to its directory. A full
+    // Windows path like `C:\…\home.tar` is otherwise parsed by GNU tar as a
+    // remote `host:file` spec ("tar: Cannot connect to C: resolve failed").
     "-f",
-    input.archivePath,
+    path.basename(input.archivePath),
     "-C",
     input.localDir,
     ...excludeArgs,
     ".",
-  ]);
+  ], { cwd: path.dirname(input.archivePath) });
 }
 
 async function extractTarballToDirectory(input: {
@@ -160,7 +164,10 @@ async function extractTarballToDirectory(input: {
   localDir: string;
 }): Promise<void> {
   await fs.mkdir(input.localDir, { recursive: true });
-  await execTar(["-xf", input.archivePath, "-C", input.localDir]);
+  // See createTarballFromDirectory: keep the archive path colon-free for GNU tar.
+  await execTar(["-xf", path.basename(input.archivePath), "-C", input.localDir], {
+    cwd: path.dirname(input.archivePath),
+  });
 }
 
 async function walkDirectory(root: string, relative = ""): Promise<string[]> {
@@ -253,35 +260,51 @@ export async function prepareSandboxManagedRuntime(input: {
   workspaceExclude?: string[];
   preserveAbsentOnRestore?: string[];
   assets?: SandboxManagedRuntimeAsset[];
+  /**
+   * When false, the local workspace is neither uploaded before the run nor
+   * downloaded after it — only `assets` are synced. Used for provider-realized
+   * remote workspaces (e.g. a Git sandbox that clones the repo itself), where
+   * overwriting the remote workspace with a local copy would clobber the clone.
+   */
+  syncWorkspace?: boolean;
 }): Promise<PreparedSandboxManagedRuntime> {
   const workspaceRemoteDir = input.workspaceRemoteDir ?? input.spec.remoteCwd;
   const runtimeRootDir = path.posix.join(workspaceRemoteDir, ".paperclip-runtime", input.adapterKey);
-  const baselineSnapshot = await captureDirectorySnapshot(input.workspaceLocalDir, {
-    exclude: [...new Set([".paperclip-runtime", ...(input.preserveAbsentOnRestore ?? []), ...(input.workspaceExclude ?? [])])],
-  });
+  const syncWorkspace = input.syncWorkspace !== false;
+  const baselineSnapshot = syncWorkspace
+    ? await captureDirectorySnapshot(input.workspaceLocalDir, {
+        exclude: [...new Set([".paperclip-runtime", ...(input.preserveAbsentOnRestore ?? []), ...(input.workspaceExclude ?? [])])],
+      })
+    : null;
 
   await withTempDir("paperclip-sandbox-sync-", async (tempDir) => {
-    const workspaceTarPath = path.join(tempDir, "workspace.tar");
-    await createTarballFromDirectory({
-      localDir: input.workspaceLocalDir,
-      archivePath: workspaceTarPath,
-      exclude: input.workspaceExclude,
-    });
-    const workspaceTarBytes = await fs.readFile(workspaceTarPath);
-    const remoteWorkspaceTar = path.posix.join(runtimeRootDir, "workspace-upload.tar");
-    await input.client.makeDir(runtimeRootDir);
-    await input.client.writeFile(remoteWorkspaceTar, toArrayBuffer(workspaceTarBytes));
-    const preservedNames = new Set([".paperclip-runtime", ...(input.preserveAbsentOnRestore ?? [])]);
-    const findPreserveArgs = [...preservedNames].map((entry) => `! -name ${shellQuote(entry)}`).join(" ");
-    await input.client.run(
-      `sh -c ${shellQuote(
-        `mkdir -p ${shellQuote(workspaceRemoteDir)} && ` +
-          `find ${shellQuote(workspaceRemoteDir)} -mindepth 1 -maxdepth 1 ${findPreserveArgs} -exec rm -rf -- {} + && ` +
-          `tar -xf ${shellQuote(remoteWorkspaceTar)} -C ${shellQuote(workspaceRemoteDir)} && ` +
-          `rm -f ${shellQuote(remoteWorkspaceTar)}`,
-      )}`,
-      { timeoutMs: input.spec.timeoutMs },
-    );
+    if (syncWorkspace) {
+      const workspaceTarPath = path.join(tempDir, "workspace.tar");
+      await createTarballFromDirectory({
+        localDir: input.workspaceLocalDir,
+        archivePath: workspaceTarPath,
+        exclude: input.workspaceExclude,
+      });
+      const workspaceTarBytes = await fs.readFile(workspaceTarPath);
+      const remoteWorkspaceTar = path.posix.join(runtimeRootDir, "workspace-upload.tar");
+      await input.client.makeDir(runtimeRootDir);
+      await input.client.writeFile(remoteWorkspaceTar, toArrayBuffer(workspaceTarBytes));
+      const preservedNames = new Set([".paperclip-runtime", ...(input.preserveAbsentOnRestore ?? [])]);
+      const findPreserveArgs = [...preservedNames].map((entry) => `! -name ${shellQuote(entry)}`).join(" ");
+      await input.client.run(
+        `sh -c ${shellQuote(
+          `mkdir -p ${shellQuote(workspaceRemoteDir)} && ` +
+            `find ${shellQuote(workspaceRemoteDir)} -mindepth 1 -maxdepth 1 ${findPreserveArgs} -exec rm -rf -- {} + && ` +
+            `tar -xf ${shellQuote(remoteWorkspaceTar)} -C ${shellQuote(workspaceRemoteDir)} && ` +
+            `rm -f ${shellQuote(remoteWorkspaceTar)}`,
+        )}`,
+        { timeoutMs: input.spec.timeoutMs },
+      );
+    } else {
+      // Assets still need the runtime root to exist even when the workspace
+      // upload is skipped.
+      await input.client.makeDir(runtimeRootDir);
+    }
 
     for (const asset of input.assets ?? []) {
       const assetTarPath = path.join(tempDir, `${asset.key}.tar`);
@@ -318,6 +341,7 @@ export async function prepareSandboxManagedRuntime(input: {
     runtimeRootDir,
     assetDirs,
     restoreWorkspace: async () => {
+      if (!syncWorkspace || !baselineSnapshot) return;
       await withTempDir("paperclip-sandbox-restore-", async (tempDir) => {
         const remoteWorkspaceTar = path.posix.join(runtimeRootDir, "workspace-download.tar");
         await input.client.run(

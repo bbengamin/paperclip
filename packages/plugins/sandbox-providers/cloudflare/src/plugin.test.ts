@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { isValidSandboxEnvKey, sanitizeExecuteEnv } from "./plugin.js";
 
 const fetchMock = vi.fn();
 let plugin: typeof import("./plugin.js").default;
@@ -393,5 +394,37 @@ describe("Cloudflare sandbox provider plugin", () => {
     })).rejects.toThrow("Failed to prepare Cloudflare sandbox workspace at /workspace/paperclip: mkdir: permission denied");
 
     expect(requestHeadersAt().get("X-Paperclip-Issue-Id")).toBe("issue-1");
+  });
+});
+
+describe("sanitizeExecuteEnv", () => {
+  it("drops env keys that are not valid POSIX shell identifiers", () => {
+    const result = sanitizeExecuteEnv({
+      PATH: "/usr/bin",
+      "CommonProgramFiles(x86)": "C:/x",
+      "ProgramFiles(x86)": "C:/y",
+      HTTP_PROXY: "http://127.0.0.1:1056",
+    });
+    expect(result).toEqual({ PATH: "/usr/bin", HTTP_PROXY: "http://127.0.0.1:1056" });
+  });
+
+  it("strips the internal exec channel marker", () => {
+    const result = sanitizeExecuteEnv({
+      PAPERCLIP_SANDBOX_EXEC_CHANNEL: "bridge",
+      FOO: "bar",
+    });
+    expect(result).toEqual({ FOO: "bar" });
+  });
+
+  it("returns undefined when env is undefined", () => {
+    expect(sanitizeExecuteEnv(undefined)).toBeUndefined();
+  });
+
+  it("validates identifier rules", () => {
+    expect(isValidSandboxEnvKey("FOO_BAR")).toBe(true);
+    expect(isValidSandboxEnvKey("_x1")).toBe(true);
+    expect(isValidSandboxEnvKey("1FOO")).toBe(false);
+    expect(isValidSandboxEnvKey("FOO(x86)")).toBe(false);
+    expect(isValidSandboxEnvKey("foo-bar")).toBe(false);
   });
 });

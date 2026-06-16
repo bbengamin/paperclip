@@ -105,6 +105,11 @@ describe("remote Git sandbox", () => {
     expect(runner.scripts.join("\n")).toContain("git checkout -B 'paperclip/RL-199' FETCH_HEAD");
     expect(runner.scripts.join("\n")).toContain("pnpm install");
     expect(runner.scripts.join("\n")).toContain("git push origin HEAD:refs/heads/'paperclip/RL-199'");
+    // A fresh sandbox has no git identity; ensure we set a repo-local one so
+    // commits don't abort with "Author identity unknown".
+    expect(runner.scripts.join("\n")).toContain("git config user.email");
+    expect(runner.scripts.join("\n")).toContain("git config user.name");
+    expect(runner.scripts.join("\n")).toContain("/.paperclip-runtime/");
     expect(runner.scripts.join("\n")).not.toMatch(/\btar\b|base64|workspace-upload|workspace-download/);
   });
 
@@ -149,6 +154,8 @@ describe("remote Git sandbox", () => {
           remoteCwd: "/sandbox/repo",
           setupCommand: null,
           cleanupCommand: null,
+          committerName: "Paperclip Agent",
+          committerEmail: "paperclip-agent@users.noreply.github.com",
         },
       }),
     ).rejects.toThrow("repository not found");
@@ -201,6 +208,8 @@ describe("remote Git sandbox", () => {
           remoteCwd: "/sandbox/repo",
           setupCommand: null,
           cleanupCommand: null,
+          committerName: "Paperclip Agent",
+          committerEmail: "paperclip-agent@users.noreply.github.com",
         },
         safety: {
           requiredCredentialEnv: ["GIT_AUTH_TOKEN"],
@@ -286,6 +295,8 @@ describe("remote Git sandbox", () => {
           remoteCwd: "/sandbox/repo",
           setupCommand: null,
           cleanupCommand: null,
+          committerName: "Paperclip Agent",
+          committerEmail: "paperclip-agent@users.noreply.github.com",
         },
         safety: {
           approvedEnv: {
@@ -304,6 +315,8 @@ describe("remote Git sandbox", () => {
           remoteCwd: "/sandbox/repo",
           setupCommand: null,
           cleanupCommand: null,
+          committerName: "Paperclip Agent",
+          committerEmail: "paperclip-agent@users.noreply.github.com",
         },
         safety: {
           approvedEnv: {
