@@ -44,7 +44,7 @@ import {
   isCodexTransientUpstreamError,
   isCodexUnknownSessionError,
 } from "./parse.js";
-import { pathExists, prepareManagedCodexHome, resolveManagedCodexHomeDir, resolveSharedCodexHomeDir } from "./codex-home.js";
+import { pathExists, prepareManagedCodexHome, prepareRemoteCodexHomeAsset, resolveManagedCodexHomeDir, resolveSharedCodexHomeDir } from "./codex-home.js";
 import { resolveCodexDesiredSkillNames } from "./skills.js";
 import { buildCodexExecArgs } from "./codex-args.js";
 import { SANDBOX_INSTALL_COMMAND } from "../index.js";
@@ -368,6 +368,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   );
   const graceSec = asNumber(config.graceSec, 20);
   let effectiveExecutionCwd = adapterExecutionTargetRemoteCwd(executionTarget, cwd);
+  // For remote runs, sync a sandbox-sanitized copy of the Codex home so the
+  // sandbox does not inherit host-only config.toml sections (notably
+  // `mcp_servers`, which point at host binaries and stall Codex for each
+  // server's startup_timeout_sec on every run).
+  const remoteCodexHomeAsset = executionTargetIsRemote
+    ? await prepareRemoteCodexHomeAsset(effectiveCodexHome)
+    : null;
+  const remoteCodexHomeAssetDir = remoteCodexHomeAsset?.dir ?? effectiveCodexHome;
   const preparedExecutionTargetRuntime = executionTargetIsRemote
     ? await (async () => {
         await onLog(
@@ -393,12 +401,15 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           assets: [
             {
               key: "home",
-              localDir: effectiveCodexHome,
+              localDir: remoteCodexHomeAssetDir,
               followSymlinks: true,
             },
           ],
         });
-      })()
+      })().catch(async (error) => {
+        await remoteCodexHomeAsset?.cleanup();
+        throw error;
+      })
     : null;
   if (preparedExecutionTargetRuntime?.workspaceRemoteDir) {
     effectiveExecutionCwd = preparedExecutionTargetRuntime.workspaceRemoteDir;
@@ -870,5 +881,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       );
       await restoreRemoteWorkspace();
     }
+    await remoteCodexHomeAsset?.cleanup();
   }
 }

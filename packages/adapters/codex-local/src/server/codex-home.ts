@@ -8,6 +8,94 @@ const TRUTHY_ENV_RE = /^(1|true|yes|on)$/i;
 const COPIED_SHARED_FILES = ["config.json", "config.toml", "instructions.md"] as const;
 const SYMLINKED_SHARED_FILES = ["auth.json"] as const;
 
+// Allowlist for the config.toml shipped into a remote sandbox. We send ONLY
+// what Codex needs to run against the configured model provider, and nothing
+// else — no `mcp_servers` (whose host binaries don't exist in the sandbox and
+// stall Codex for each server's startup_timeout_sec), no project trust lists,
+// plugins, marketplaces, desktop/Windows settings, etc.
+//
+// Kept top-level keys (everything else in the preamble is dropped):
+const REMOTE_KEPT_TOP_LEVEL_KEYS = new Set([
+  "model",
+  "model_provider",
+  "model_reasoning_effort",
+  "model_reasoning_summary",
+  "model_verbosity",
+  "model_supports_reasoning_summaries",
+  "approval_policy",
+  "preferred_auth_method",
+  "personality",
+]);
+// Kept sections: only the model provider definitions (e.g.
+// `[model_providers.cliproxyapi]` and any sub-tables).
+const REMOTE_KEPT_SECTION_ROOT = "model_providers";
+
+/**
+ * Reduces a Codex `config.toml` to the minimum needed inside a remote sandbox:
+ * the allowlisted top-level keys ({@link REMOTE_KEPT_TOP_LEVEL_KEYS}) plus the
+ * `[model_providers.*]` sections. Everything else — MCP servers, project trust
+ * lists, plugins, marketplaces, desktop/Windows host settings — is dropped, so
+ * Codex starts clean and fast and never tries to launch host-only tooling.
+ */
+export function sanitizeRemoteCodexConfigToml(toml: string): string {
+  const lines = toml.split(/\r?\n/);
+  const out: string[] = [];
+  let inPreamble = true;
+  let inKeptSection = false;
+  for (const line of lines) {
+    const header = /^\s*\[\[?\s*([A-Za-z0-9_-]+)/.exec(line);
+    if (header) {
+      inPreamble = false;
+      inKeptSection = header[1]!.toLowerCase() === REMOTE_KEPT_SECTION_ROOT;
+      if (inKeptSection) out.push(line);
+      continue;
+    }
+    if (inPreamble) {
+      const key = /^\s*([A-Za-z0-9_-]+)\s*=/.exec(line);
+      if (key && REMOTE_KEPT_TOP_LEVEL_KEYS.has(key[1]!.toLowerCase())) {
+        out.push(line);
+      }
+      continue;
+    }
+    if (inKeptSection) out.push(line);
+  }
+  return out.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd() + "\n";
+}
+
+/**
+ * Builds a throwaway Codex home directory suitable for syncing into a remote
+ * sandbox: the same auth/instructions as the managed home, but with a
+ * sandbox-sanitized `config.toml` (see {@link sanitizeRemoteCodexConfigToml}).
+ * The caller must invoke `cleanup()` when the run finishes.
+ */
+export async function prepareRemoteCodexHomeAsset(
+  sourceHome: string,
+): Promise<{ dir: string; cleanup: () => Promise<void> }> {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-remote-home-"));
+  const cleanup = async () => {
+    await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+  };
+  try {
+    const configSource = path.join(sourceHome, "config.toml");
+    if (await pathExists(configSource)) {
+      const raw = await fs.readFile(configSource, "utf8");
+      await fs.writeFile(path.join(dir, "config.toml"), sanitizeRemoteCodexConfigToml(raw), { mode: 0o600 });
+    }
+    // Copy the remaining shared files (auth.json, instructions, etc.) verbatim,
+    // following symlinks so the sandbox gets real file contents.
+    for (const name of [...SYMLINKED_SHARED_FILES, "config.json", "instructions.md"]) {
+      const src = path.join(sourceHome, name);
+      if (await pathExists(src)) {
+        await fs.copyFile(src, path.join(dir, name));
+      }
+    }
+    return { dir, cleanup };
+  } catch (error) {
+    await cleanup();
+    throw error;
+  }
+}
+
 function nonEmpty(value: string | undefined): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 }

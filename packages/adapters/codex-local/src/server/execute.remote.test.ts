@@ -165,8 +165,11 @@ describe("codex remote execution", () => {
       remoteDir: managedRemoteWorkspace,
     }));
     expect(syncDirectoryToSsh).toHaveBeenCalledTimes(1);
+    // Remote runs sync a throwaway, sandbox-sanitized copy of the Codex home
+    // (host-only config.toml sections stripped), so localDir is a temp dir
+    // rather than the managed home itself.
     expect(syncDirectoryToSsh).toHaveBeenCalledWith(expect.objectContaining({
-      localDir: codexHomeDir,
+      localDir: expect.any(String),
       remoteDir: `${managedRemoteWorkspace}/.paperclip-runtime/codex/home`,
       followSymlinks: true,
     }));

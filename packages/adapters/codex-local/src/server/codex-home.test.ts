@@ -2,7 +2,61 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { prepareManagedCodexHome } from "./codex-home.js";
+import { prepareManagedCodexHome, sanitizeRemoteCodexConfigToml } from "./codex-home.js";
+
+describe("sanitizeRemoteCodexConfigToml", () => {
+  it("keeps only allowlisted top-level keys and model_providers sections", () => {
+    const toml = [
+      "windows_wsl_setup_acknowledged = true",
+      'model = "gpt-5.5"',
+      'model_provider = "cliproxyapi"',
+      'model_reasoning_effort = "medium"',
+      'personality = "pragmatic"',
+      "",
+      "[marketplaces.openai-bundled]",
+      'source = "local"',
+      "",
+      "[windows]",
+      'sandbox = "elevated"',
+      "",
+      "[projects.'c:\\\\work']",
+      'trust_level = "trusted"',
+      "",
+      '[plugins."linear@openai-curated"]',
+      "enabled = true",
+      "",
+      "[model_providers.cliproxyapi]",
+      'base_url = "http://100.114.28.103:8317/v1"',
+      'experimental_bearer_token = "secret"',
+      'wire_api = "responses"',
+      "requires_openai_auth = false",
+      "",
+      "[mcp_servers.node_repl]",
+      'command = "C:\\\\node_repl.exe"',
+      "startup_timeout_sec = 120",
+    ].join("\n");
+
+    const out = sanitizeRemoteCodexConfigToml(toml);
+
+    // Required for Codex + the provider: kept.
+    expect(out).toContain('model = "gpt-5.5"');
+    expect(out).toContain('model_provider = "cliproxyapi"');
+    expect(out).toContain('model_reasoning_effort = "medium"');
+    expect(out).toContain("[model_providers.cliproxyapi]");
+    expect(out).toContain("experimental_bearer_token");
+    expect(out).toContain("requires_openai_auth = false");
+
+    // Everything host-specific: dropped.
+    expect(out).not.toContain("windows_wsl_setup_acknowledged");
+    expect(out).not.toContain("[mcp_servers");
+    expect(out).not.toContain("node_repl.exe");
+    expect(out).not.toContain("startup_timeout_sec");
+    expect(out).not.toContain("[projects");
+    expect(out).not.toContain("[windows]");
+    expect(out).not.toContain("[marketplaces");
+    expect(out).not.toContain("[plugins");
+  });
+});
 
 describe("codex managed home", () => {
   afterEach(() => {
