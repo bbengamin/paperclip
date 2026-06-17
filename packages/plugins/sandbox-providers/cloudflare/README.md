@@ -37,6 +37,8 @@ The package includes an operator-facing Cloudflare Worker scaffold under [bridge
 
 ## Local development
 
+Build before installing this package from a local path in Paperclip. The local plugin installer reads the manifest declared in `package.json` at `dist/manifest.js`; without a build, Paperclip reports that no manifest was found.
+
 ```bash
 cd packages/plugins/sandbox-providers/cloudflare
 pnpm install --ignore-workspace --no-lockfile

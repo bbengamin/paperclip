@@ -56,6 +56,38 @@ interface ExecuteRequestBody {
   sessionId?: string;
 }
 
+const TAILSCALE_PROXY_ENV = {
+  ALL_PROXY: "socks5://127.0.0.1:1055",
+  all_proxy: "socks5://127.0.0.1:1055",
+  HTTP_PROXY: "http://127.0.0.1:1056",
+  http_proxy: "http://127.0.0.1:1056",
+  HTTPS_PROXY: "http://127.0.0.1:1056",
+  https_proxy: "http://127.0.0.1:1056",
+};
+
+function mergeNoProxy(existing: string | undefined): string {
+  const values = new Set(
+    (existing ?? "")
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean),
+  );
+  for (const value of ["127.0.0.1", "localhost", "::1"]) values.add(value);
+  return Array.from(values).join(",");
+}
+
+function withTailscaleProxyEnv(env: BridgeEnv, commandEnv?: Record<string, string>): Record<string, string> | undefined {
+  if (!env.TAILSCALE_AUTHKEY || env.TAILSCALE_AUTHKEY.trim().length === 0) return commandEnv;
+
+  const next = {
+    ...TAILSCALE_PROXY_ENV,
+    ...(commandEnv ?? {}),
+  };
+  next.NO_PROXY = mergeNoProxy(commandEnv?.NO_PROXY ?? commandEnv?.no_proxy);
+  next.no_proxy = next.NO_PROXY;
+  return next;
+}
+
 function readBoolean(value: unknown, fallback: boolean): boolean {
   return value === undefined ? fallback : value === true;
 }
@@ -122,6 +154,34 @@ function requireZeroExit(action: string, result: { exitCode: number | null; time
       `${action} failed with exit code ${result.exitCode ?? "null"}${result.stderr.trim() ? `: ${result.stderr.trim()}` : ""}`,
     );
   }
+}
+
+async function ensureTailscale(
+  sandbox: CloudflareSandbox,
+  env: BridgeEnv,
+  input: {
+    providerLeaseId: string;
+    timeoutMs: number;
+    sessionStrategy: SessionStrategy;
+    sessionId: string;
+  },
+) {
+  if (!env.TAILSCALE_AUTHKEY || env.TAILSCALE_AUTHKEY.trim().length === 0) return;
+
+  const result = await executeInSandbox({
+    sandbox,
+    command: "tailscale-up",
+    cwd: "/",
+    timeoutMs: input.timeoutMs,
+    sessionStrategy: input.sessionStrategy,
+    sessionId: input.sessionId,
+    env: {
+      TAILSCALE_AUTHKEY: env.TAILSCALE_AUTHKEY,
+      TAILSCALE_HOSTNAME: env.TAILSCALE_HOSTNAME?.trim() || input.providerLeaseId,
+      ...(env.TAILSCALE_EXTRA_ARGS ? { TAILSCALE_EXTRA_ARGS: env.TAILSCALE_EXTRA_ARGS } : {}),
+    },
+  });
+  requireZeroExit("tailscale up", result);
 }
 
 async function ensureWorkspace(
@@ -236,6 +296,7 @@ export async function handleBridgeRequest(request: Request, env: BridgeEnv): Pro
     const sandbox = await resolveSandbox(env, sandboxId, { keepAlive, sleepAfter, normalizeId });
     await applySandboxKeepAlive(sandbox, keepAlive);
     try {
+      await ensureTailscale(sandbox, env, { providerLeaseId: sandboxId, timeoutMs, sessionStrategy, sessionId });
       await ensureWorkspace(sandbox, { remoteCwd, sessionStrategy, sessionId, timeoutMs });
       const result = await executeInSandbox({
         sandbox,
@@ -288,6 +349,7 @@ export async function handleBridgeRequest(request: Request, env: BridgeEnv): Pro
     // shouldn't destroy it on a transient setup failure during reattachment).
     try {
       await applySandboxKeepAlive(sandbox, keepAlive);
+      await ensureTailscale(sandbox, env, { providerLeaseId, timeoutMs, sessionStrategy, sessionId });
       await ensureWorkspace(sandbox, { remoteCwd, sessionStrategy, sessionId, timeoutMs });
       await writeSentinel(sandbox, {
         providerLeaseId,
@@ -342,6 +404,12 @@ export async function handleBridgeRequest(request: Request, env: BridgeEnv): Pro
     // `getSandbox` is idempotent on the Sandbox SDK side (no new sandbox is
     // created), so a failed resume doesn't leak a *new* sandbox.
     await applySandboxKeepAlive(sandbox, keepAlive);
+    await ensureTailscale(sandbox, env, {
+      providerLeaseId: body.providerLeaseId,
+      timeoutMs,
+      sessionStrategy,
+      sessionId,
+    });
 
     if (!(await verifySentinel(sandbox, { remoteCwd, sessionStrategy, sessionId, timeoutMs }))) {
       return toErrorResponse(409, "sandbox_state_lost", "Cloudflare sandbox state is no longer available.");
@@ -440,7 +508,7 @@ export async function handleBridgeRequest(request: Request, env: BridgeEnv): Pro
               command: body.command!,
               args: Array.isArray(body.args) ? body.args.filter((value): value is string => typeof value === "string") : [],
               cwd: typeof body.cwd === "string" ? body.cwd : undefined,
-              env: body.env,
+              env: withTailscaleProxyEnv(env, body.env),
               stdin: body.stdin ?? null,
               timeoutMs: readInteger(body.timeoutMs, DEFAULT_TIMEOUT_MS),
               sessionStrategy,
@@ -467,7 +535,7 @@ export async function handleBridgeRequest(request: Request, env: BridgeEnv): Pro
       command: body.command,
       args: Array.isArray(body.args) ? body.args.filter((value): value is string => typeof value === "string") : [],
       cwd: typeof body.cwd === "string" ? body.cwd : undefined,
-      env: body.env,
+      env: withTailscaleProxyEnv(env, body.env),
       stdin: body.stdin ?? null,
       timeoutMs: readInteger(body.timeoutMs, DEFAULT_TIMEOUT_MS),
       sessionStrategy,

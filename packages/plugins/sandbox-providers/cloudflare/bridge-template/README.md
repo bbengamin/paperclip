@@ -22,6 +22,16 @@ It exposes a small authenticated JSON API under `/api/paperclip-sandbox/v1` and 
 npx wrangler secret put BRIDGE_AUTH_TOKEN
 ```
 
+Optional, for private-network access through Tailscale:
+
+```bash
+npx wrangler secret put TAILSCALE_AUTHKEY
+```
+
+The bridge container image installs Tailscale and Codex during deploy. When `TAILSCALE_AUTHKEY` is set, the bridge runs `tailscale-up` inside each sandbox before preparing the Paperclip workspace. Keep this auth key in Cloudflare Worker secrets; do not put it in the Dockerfile or Paperclip environment config.
+
+For Codex Remote adapters that use ChatGPT subscription auth, Paperclip's environment test verifies the sandbox, copied Codex home, Tailscale, and configured model provider connectivity. It intentionally skips the full Codex conversation probe because subscription tokens can require an interactive refresh and may otherwise hold the test request open until the plugin RPC times out.
+
 ## Local development
 
 ```bash
@@ -48,3 +58,4 @@ After deploy, configure Paperclip with:
 - `reuseLease: true` should only be used together with `keepAlive: true`
 - `.workers.dev` is fine for bridge HTTP traffic, but preview/wildcard host flows are intentionally out of scope here
 - keep the Docker image aligned with the installed `@cloudflare/sandbox` version
+- set `TAILSCALE_HOSTNAME` and `TAILSCALE_EXTRA_ARGS` as Worker variables only if you need custom Tailscale naming or flags

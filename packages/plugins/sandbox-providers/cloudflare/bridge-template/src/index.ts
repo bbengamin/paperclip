@@ -1,25 +1,21 @@
-import { Sandbox } from "@cloudflare/sandbox";
-import { handleBridgeRequest, } from "./routes.js";
+import { handleBridgeRequest } from "./routes.js";
 import type { BridgeEnv } from "./sandboxes.js";
 
-export { Sandbox };
+export { Sandbox } from "@cloudflare/sandbox";
 
-export default {
-  async fetch(request: Request, env: BridgeEnv): Promise<Response> {
-    try {
-      return await handleBridgeRequest(request, env);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      return new Response(
-        JSON.stringify({
-          error: "internal_error",
-          message,
-        }),
-        {
-          status: 500,
-          headers: { "Content-Type": "application/json" },
-        },
-      );
-    }
-  },
-};
+async function fetch(request: Request, env: BridgeEnv): Promise<Response> {
+  try {
+    return await handleBridgeRequest(request, env);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return Response.json(
+      {
+        error: "internal_error",
+        message,
+      },
+      { status: 500 },
+    );
+  }
+}
+
+export default { fetch };

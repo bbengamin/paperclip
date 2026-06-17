@@ -5,6 +5,9 @@ import { buildLeaseSandboxId, buildSentinelPath, isTimeoutError } from "./helper
 export interface BridgeEnv {
   Sandbox: DurableObjectNamespace<CloudflareSandbox>;
   BRIDGE_AUTH_TOKEN?: string;
+  TAILSCALE_AUTHKEY?: string;
+  TAILSCALE_HOSTNAME?: string;
+  TAILSCALE_EXTRA_ARGS?: string;
 }
 
 export interface BridgeLeaseConfig {

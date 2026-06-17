@@ -130,6 +130,7 @@ describe("command managed runtime", () => {
     await expect(readFile(path.join(localWorkspaceDir, ".paperclip-runtime", "remote-state.json"), "utf8")).rejects
       .toMatchObject({ code: "ENOENT" });
     expect(calls.every((call) => call.stdin == null)).toBe(true);
+    expect(calls.every((call) => call.env?.PAPERCLIP_SANDBOX_EXEC_CHANNEL === "bridge")).toBe(true);
   });
 
   it("runs setup commands from a stable root cwd when staging into a nested remote workspace dir", async () => {

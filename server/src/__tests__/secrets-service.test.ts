@@ -127,6 +127,46 @@ describeEmbeddedPostgres("secretService", () => {
     ).rejects.toThrow(/already exists/i);
   });
 
+  it("refreshes exact top-level config path bindings when syncing secret refs", async () => {
+    const companyId = await seedCompany();
+    const svc = secretService(db);
+    const firstSecret = await svc.create(companyId, {
+      name: `first-${randomUUID()}`,
+      provider: "local_encrypted",
+      value: "one",
+    });
+    const secondSecret = await svc.create(companyId, {
+      name: `second-${randomUUID()}`,
+      provider: "local_encrypted",
+      value: "two",
+    });
+
+    await svc.syncSecretRefsForTarget(companyId, { targetType: "environment", targetId: "env-1" }, [
+      {
+        secretId: firstSecret.id,
+        configPath: "apiKey",
+      },
+    ]);
+
+    await svc.syncSecretRefsForTarget(companyId, { targetType: "environment", targetId: "env-1" }, [
+      {
+        secretId: firstSecret.id,
+        configPath: "apiKey",
+      },
+      {
+        secretId: secondSecret.id,
+        configPath: "tailscaleAuthKey",
+      },
+    ]);
+
+    const bindings = await db
+      .select()
+      .from(companySecretBindings)
+      .where(eq(companySecretBindings.targetId, "env-1"));
+
+    expect(bindings.map((binding) => binding.configPath).sort()).toEqual(["apiKey", "tailscaleAuthKey"]);
+  });
+
   it("reports reference counts and resolves binding target labels", async () => {
     const companyId = await seedCompany();
     const svc = secretService(db);

@@ -140,4 +140,47 @@ describe("bridge routes", () => {
     expect(body).toContain("event: stdout");
     expect(body).toContain("event: complete");
   });
+
+  it("injects userspace Tailscale proxy env into sandbox exec commands", async () => {
+    const sessionExec = vi.fn().mockResolvedValue({ exitCode: 0, stdout: "", stderr: "" });
+    const sandbox = {
+      getSession: vi.fn().mockResolvedValue({ exec: sessionExec }),
+      createSession: vi.fn(),
+      writeFile: vi.fn(),
+      deleteFile: vi.fn(),
+      setKeepAlive: vi.fn().mockResolvedValue(undefined),
+    };
+    vi.mocked(resolveSandbox).mockResolvedValue(sandbox as never);
+
+    const response = await handleBridgeRequest(
+      bridgeRequest("/api/paperclip-sandbox/v1/exec", {
+        providerLeaseId: "pc-run-1-abcd1234",
+        command: "node",
+        args: ["probe.js"],
+        env: {
+          CODEX_HOME: "/workspace/.codex",
+          NO_PROXY: "metadata.google.internal",
+        },
+        sessionStrategy: "named",
+        sessionId: "paperclip",
+      }),
+      {
+        BRIDGE_AUTH_TOKEN: "secret-token",
+        TAILSCALE_AUTHKEY: "tskey-test",
+        Sandbox: {} as never,
+      },
+    );
+
+    expect(response.status).toBe(200);
+    const commandArg = sessionExec.mock.calls[0]?.[0] as string;
+    expect(commandArg).toContain("CODEX_HOME=");
+    expect(commandArg).toContain("HTTP_PROXY=");
+    expect(commandArg).toContain("http://127.0.0.1:1056");
+    expect(commandArg).toContain("ALL_PROXY=");
+    expect(commandArg).toContain("socks5://127.0.0.1:1055");
+    expect(commandArg).toContain("NO_PROXY=");
+    expect(commandArg).toContain("metadata.google.internal");
+    expect(commandArg).toContain("127.0.0.1");
+    expect(commandArg).toContain("localhost");
+  });
 });
