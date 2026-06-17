@@ -45,6 +45,8 @@ describe("sanitizeRemoteCodexConfigToml", () => {
     expect(out).toContain("[model_providers.cliproxyapi]");
     expect(out).toContain("experimental_bearer_token");
     expect(out).toContain("requires_openai_auth = false");
+    // Force HTTP transport so the sandbox doesn't burn ~75s retrying wss://.
+    expect(out).toContain("supports_websockets = false");
 
     // Everything host-specific: dropped.
     expect(out).not.toContain("windows_wsl_setup_acknowledged");
@@ -55,6 +57,21 @@ describe("sanitizeRemoteCodexConfigToml", () => {
     expect(out).not.toContain("[windows]");
     expect(out).not.toContain("[marketplaces");
     expect(out).not.toContain("[plugins");
+  });
+
+  it("keeps an explicit supports_websockets value instead of injecting", () => {
+    const toml = [
+      'model_provider = "cliproxyapi"',
+      "",
+      "[model_providers.cliproxyapi]",
+      'base_url = "http://x/v1"',
+      "supports_websockets = true",
+    ].join("\n");
+
+    const out = sanitizeRemoteCodexConfigToml(toml);
+
+    expect(out).toContain("supports_websockets = true");
+    expect(out).not.toContain("supports_websockets = false");
   });
 });
 

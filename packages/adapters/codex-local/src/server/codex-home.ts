@@ -30,23 +30,52 @@ const REMOTE_KEPT_TOP_LEVEL_KEYS = new Set([
 // `[model_providers.cliproxyapi]` and any sub-tables).
 const REMOTE_KEPT_SECTION_ROOT = "model_providers";
 
+/** Returns the dotted segments of a TOML table header, or null if not a header. */
+function parseTomlSectionSegments(line: string): string[] | null {
+  const match = /^\s*\[\[?\s*([^\]]+?)\s*\]\]?\s*$/.exec(line);
+  if (!match) return null;
+  return match[1]!.split(".").map((segment) => segment.trim().replace(/^['"]|['"]$/g, ""));
+}
+
 /**
  * Reduces a Codex `config.toml` to the minimum needed inside a remote sandbox:
  * the allowlisted top-level keys ({@link REMOTE_KEPT_TOP_LEVEL_KEYS}) plus the
  * `[model_providers.*]` sections. Everything else — MCP servers, project trust
  * lists, plugins, marketplaces, desktop/Windows host settings — is dropped, so
  * Codex starts clean and fast and never tries to launch host-only tooling.
+ *
+ * Each provider also gets `supports_websockets = false` injected: Codex defaults
+ * to a `wss://` transport for the Responses API, but a sandbox reaching the
+ * provider through a userspace-Tailscale HTTP proxy cannot open that WebSocket,
+ * so Codex burns ~75s retrying it before falling back to HTTP on every run (the
+ * misleading "failed to refresh available models: timeout waiting for child
+ * process to exit"). Forcing HTTP removes that stall.
  */
 export function sanitizeRemoteCodexConfigToml(toml: string): string {
   const lines = toml.split(/\r?\n/);
   const out: string[] = [];
   let inPreamble = true;
   let inKeptSection = false;
+  // Tracks an open `[model_providers.<name>]` table (not a sub-table) so we can
+  // append `supports_websockets = false` if it was not already specified.
+  let inProviderMainSection = false;
+  let providerHasWebsocketsFlag = false;
+
+  const closeProviderSection = () => {
+    if (inProviderMainSection && !providerHasWebsocketsFlag) {
+      out.push("supports_websockets = false");
+    }
+    inProviderMainSection = false;
+    providerHasWebsocketsFlag = false;
+  };
+
   for (const line of lines) {
-    const header = /^\s*\[\[?\s*([A-Za-z0-9_-]+)/.exec(line);
-    if (header) {
+    const segments = parseTomlSectionSegments(line);
+    if (segments) {
+      closeProviderSection();
       inPreamble = false;
-      inKeptSection = header[1]!.toLowerCase() === REMOTE_KEPT_SECTION_ROOT;
+      inKeptSection = segments[0]?.toLowerCase() === REMOTE_KEPT_SECTION_ROOT;
+      inProviderMainSection = inKeptSection && segments.length === 2;
       if (inKeptSection) out.push(line);
       continue;
     }
@@ -57,8 +86,15 @@ export function sanitizeRemoteCodexConfigToml(toml: string): string {
       }
       continue;
     }
-    if (inKeptSection) out.push(line);
+    if (inKeptSection) {
+      const key = /^\s*([A-Za-z0-9_-]+)\s*=/.exec(line);
+      if (key && key[1]!.toLowerCase() === "supports_websockets") {
+        providerHasWebsocketsFlag = true;
+      }
+      out.push(line);
+    }
   }
+  closeProviderSection();
   return out.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd() + "\n";
 }
 
