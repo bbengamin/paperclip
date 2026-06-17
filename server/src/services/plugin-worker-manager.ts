@@ -725,6 +725,13 @@ export function createPluginWorkerHandle(
       PAPERCLIP_PLUGIN_ID: pluginId,
       NODE_ENV: process.env.NODE_ENV ?? "production",
       TZ: process.env.TZ ?? "UTC",
+      // Neutralize any inherited NODE_OPTIONS. When the host runs under tsx
+      // (e.g. `pnpm dev`), tsx exports NODE_OPTIONS=--import <C:\...loader.mjs>
+      // for subprocesses; on Windows that raw drive path is an invalid ESM URL
+      // and crashes the worker with ERR_UNSUPPORTED_ESM_URL_SCHEME ("protocol
+      // 'c:'"). The worker already receives its loader via execArgv as a
+      // file:// URL when needed, so it must not inherit that NODE_OPTIONS.
+      NODE_OPTIONS: "",
     };
 
     const child = fork(options.entrypointPath, [], {
