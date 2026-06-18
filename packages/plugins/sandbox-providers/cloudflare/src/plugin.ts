@@ -82,20 +82,12 @@ function resolveRemoteCwd(
 
 function resolveExecuteSession(
   config: ReturnType<typeof parseCloudflareDriverConfig>,
-  env: Record<string, string> | undefined,
+  _env: Record<string, string> | undefined,
 ) {
-  if (env?.[SANDBOX_EXEC_CHANNEL_ENV] !== SANDBOX_EXEC_CHANNEL_BRIDGE) {
-    return {
-      sessionStrategy: config.sessionStrategy,
-      sessionId: config.sessionId,
-    } as const;
-  }
-
-  const baseSessionId = config.sessionId.trim().length > 0 ? config.sessionId : "paperclip";
   return {
-    sessionStrategy: "named" as const,
-    sessionId: `${baseSessionId}-bridge`,
-  };
+    sessionStrategy: config.sessionStrategy,
+    sessionId: config.sessionId,
+  } as const;
 }
 
 export function isValidSandboxEnvKey(key: string): boolean {

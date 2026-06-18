@@ -235,7 +235,7 @@ describe("Cloudflare sandbox provider plugin", () => {
     });
   });
 
-  it("routes bridge-channel execute calls through a dedicated session", async () => {
+  it("routes bridge-channel execute calls through the configured session", async () => {
     // pluginLogger must be set for the streaming branch to be reachable, so
     // we can assert that bridge-channel calls take the non-streaming path
     // even when adapter sessions would otherwise stream.
@@ -273,8 +273,8 @@ describe("Cloudflare sandbox provider plugin", () => {
     });
 
     expect(requestBodyAt()).toMatchObject({
-      sessionStrategy: "named",
-      sessionId: "paperclip-bridge",
+      sessionStrategy: "default",
+      sessionId: "paperclip",
       env: {
         KEEP_ME: "visible",
       },

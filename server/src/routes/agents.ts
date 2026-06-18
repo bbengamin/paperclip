@@ -3402,6 +3402,49 @@ export function agentRoutes(
     );
   });
 
+  router.post("/heartbeat-runs/:runId/activity", async (req, res) => {
+    const runId = req.params.runId as string;
+    const existing = await heartbeat.getRun(runId);
+    if (!existing) {
+      res.status(404).json({ error: "Heartbeat run not found" });
+      return;
+    }
+    assertCompanyAccess(req, existing.companyId);
+    if (req.actor.type === "agent") {
+      if (!req.actor.agentId || req.actor.agentId !== existing.agentId) {
+        res.status(403).json({ error: "Run is outside this agent's authorization boundary" });
+        return;
+      }
+    } else {
+      assertBoard(req);
+    }
+
+    const source =
+      typeof req.body?.source === "string" && req.body.source.trim().length > 0
+        ? req.body.source.trim().slice(0, 80)
+        : "agent";
+    const message =
+      typeof req.body?.message === "string" && req.body.message.trim().length > 0
+        ? req.body.message.trim().slice(0, 500)
+        : "sandbox run alive";
+
+    const updated = await heartbeat.recordRunAlive(runId, {
+      actorAgentId: req.actor.type === "agent" ? req.actor.agentId : null,
+      source,
+      message,
+      payload: {
+        bridgeMode: typeof req.body?.bridgeMode === "string" ? req.body.bridgeMode.slice(0, 80) : null,
+        status: typeof req.body?.status === "string" ? req.body.status.slice(0, 80) : null,
+        at: typeof req.body?.at === "string" ? req.body.at.slice(0, 80) : null,
+      },
+    });
+    if (!updated) {
+      res.status(409).json({ error: "Heartbeat run is not running" });
+      return;
+    }
+    res.json({ ok: true, runId: updated.id, updatedAt: updated.updatedAt });
+  });
+
   router.post("/heartbeat-runs/:runId/cancel", async (req, res) => {
     assertBoard(req);
     const runId = req.params.runId as string;

@@ -526,6 +526,14 @@ Remote adapter: codex_remote
 
 Use this adapter when Codex should run in a remote sandbox environment such as Daytona and the project workspace should be realized by cloning/fetching Git in the sandbox instead of uploading and downloading workspace archives.
 
+Runtime rules:
+- Paperclip is the only task-management system for this agent. Do not search for another task-management tool.
+- Use $PAPERCLIP_API_URL for Paperclip API calls. In sandbox bridge mode this is a local bridge URL inside the sandbox, not the operator's local board URL.
+- Use Authorization: Bearer $PAPERCLIP_API_KEY on every Paperclip API request.
+- Use X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID on all mutating Paperclip requests, including comments and issue status updates.
+- To comment, POST JSON to $PAPERCLIP_API_URL/api/issues/$PAPERCLIP_TASK_ID/comments with {"body":"..."}.
+- To finish, PATCH $PAPERCLIP_API_URL/api/issues/$PAPERCLIP_TASK_ID with {"status":"done","comment":"..."}.
+
 Required operator setup:
 - select a sandbox environment for the agent, usually a Daytona environment
 - ensure that environment can access the configured project repoUrl

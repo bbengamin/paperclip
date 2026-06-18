@@ -12,6 +12,10 @@ import { definePlugin } from "../../../packages/plugins/sdk/src/define-plugin.js
 import { startWorkerRpcHost } from "../../../packages/plugins/sdk/src/worker-rpc-host.js";
 import { pluginManifestV1Schema, type PaperclipPluginManifestV1 } from "@paperclipai/shared";
 import { pluginCapabilityValidator } from "../services/plugin-capability-validator.js";
+import {
+  DEFAULT_ENVIRONMENT_EXECUTE_RPC_TIMEOUT_MS,
+  resolvePluginExecuteRpcTimeoutMs,
+} from "../services/plugin-environment-driver.js";
 
 const baseManifest: PaperclipPluginManifestV1 = {
   id: "test.environment-driver",
@@ -84,6 +88,19 @@ describe("plugin environment driver seam", () => {
       allowed: false,
       missing: ["environment.drivers.register"],
     });
+  });
+
+  it("keeps environmentExecute RPC timeout above the command timeout wrapper", () => {
+    expect(resolvePluginExecuteRpcTimeoutMs({
+      requestedTimeoutMs: 300_000,
+      config: {},
+      minimumTimeoutMs: DEFAULT_ENVIRONMENT_EXECUTE_RPC_TIMEOUT_MS,
+    })).toBe(900_000);
+
+    expect(resolvePluginExecuteRpcTimeoutMs({
+      requestedTimeoutMs: 1_234,
+      config: {},
+    })).toBe(31_234);
   });
 
   it("dispatches environment driver worker hooks and reports support", async () => {

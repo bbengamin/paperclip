@@ -530,7 +530,7 @@ describeEmbeddedPostgres("environmentRuntimeService", () => {
     expect(executed.stdout).toBe("ok\n");
     expect(released).toHaveLength(1);
     expect(released[0]?.lease.status).toBe("released");
-    expect(workerManager.call).toHaveBeenCalledWith(pluginId, "environmentExecute", expect.anything(), 31000);
+    expect(workerManager.call).toHaveBeenCalledWith(pluginId, "environmentExecute", expect.anything(), 900000);
     expect(workerManager.call).toHaveBeenCalledWith(pluginId, "environmentReleaseLease", expect.anything(), 31234);
   });
 
@@ -677,7 +677,7 @@ describeEmbeddedPostgres("environmentRuntimeService", () => {
       config: expect.objectContaining({
         apiKey: "resolved-provider-key",
       }),
-    }), 31234);
+    }), 900000);
     expect(workerManager.call).toHaveBeenCalledWith(pluginId, "environmentReleaseLease", expect.objectContaining({
       config: expect.objectContaining({
         apiKey: "resolved-provider-key",
@@ -1326,7 +1326,7 @@ describeEmbeddedPostgres("environmentRuntimeService", () => {
       args: ["ok"],
       cwd: "/workspace/project",
       env: { FOO: "bar" },
-    }), 31000);
+    }), 900000);
     expect(workerManager.call).toHaveBeenCalledWith(pluginId, "environmentDestroyLease", {
       driverKey: "fake-plugin",
       companyId,

@@ -16,6 +16,7 @@ import {
   readAdapterExecutionTarget,
   resolveAdapterExecutionTargetTimeoutSec,
   resolveAdapterExecutionTargetCommandForLogs,
+  runAdapterExecutionTargetShellCommand,
   runAdapterExecutionTargetProcess,
   startAdapterExecutionTargetPaperclipBridge,
 } from "@paperclipai/adapter-utils/execution-target";
@@ -80,6 +81,62 @@ function firstNonEmptyLine(text: string): string {
 function hasNonEmptyEnvValue(env: Record<string, string>, key: string): boolean {
   const raw = env[key];
   return typeof raw === "string" && raw.trim().length > 0;
+}
+
+async function runSandboxPaperclipPreflight(input: {
+  runId: string;
+  target: ReturnType<typeof readAdapterExecutionTarget>;
+  cwd: string;
+  env: Record<string, string>;
+  timeoutSec: number;
+  onLog: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
+}): Promise<AdapterExecutionResult | null> {
+  if (!input.target || input.target.kind !== "remote" || input.target.transport !== "sandbox") {
+    return null;
+  }
+
+  const script = [
+    "set -eu",
+    "mkdir -p .paperclip-runtime/codex",
+    "probe_file=.paperclip-runtime/codex/preflight-write-check",
+    "printf '%s\\n' paperclip-preflight > \"$probe_file\"",
+    "rm -f \"$probe_file\"",
+    "if [ -n \"${PAPERCLIP_API_URL:-}\" ] && [ -n \"${PAPERCLIP_API_KEY:-}\" ] && [ -n \"${PAPERCLIP_TASK_ID:-}\" ]; then",
+    "  curl -fsS -H \"Authorization: Bearer $PAPERCLIP_API_KEY\" \"$PAPERCLIP_API_URL/api/issues/$PAPERCLIP_TASK_ID/heartbeat-context\" >/dev/null",
+    "fi",
+  ].join("\n");
+
+  const result = await runAdapterExecutionTargetShellCommand(
+    input.runId,
+    input.target,
+    script,
+    {
+      cwd: input.cwd,
+      env: input.env,
+      timeoutSec: Math.min(Math.max(input.timeoutSec, 1), 30),
+      onLog: input.onLog,
+    },
+  );
+
+  if (!result.timedOut && result.exitCode === 0) return null;
+
+  const detail = [result.stderr.trim(), result.stdout.trim()].filter(Boolean).join("\n");
+  const message = result.timedOut
+    ? "Codex sandbox preflight timed out before starting Codex."
+    : `Codex sandbox preflight failed before starting Codex${detail ? `: ${detail}` : "."}`;
+  return {
+    exitCode: result.exitCode ?? 1,
+    signal: result.signal,
+    timedOut: result.timedOut,
+    errorMessage: message,
+    errorCode: "codex_sandbox_preflight_failed",
+    resultJson: {
+      phase: "codex_sandbox_preflight",
+      stdout: result.stdout,
+      stderr: result.stderr,
+      timedOut: result.timedOut,
+    },
+  };
 }
 
 function resolveCodexBillingType(env: Record<string, string>): "api" | "subscription" {
@@ -711,6 +768,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       {
         resumeSessionId,
         skipGitRepoCheck: executionTargetIsSandbox,
+        isolatePaperclipTaskSystem: executionTargetIsSandbox,
       },
     );
     const args = execArgs.args;
@@ -854,6 +912,16 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   };
 
   try {
+    const preflightFailure = await runSandboxPaperclipPreflight({
+      runId,
+      target: runtimeExecutionTarget ?? null,
+      cwd: effectiveExecutionCwd,
+      env: runtimeEnv,
+      timeoutSec,
+      onLog,
+    });
+    if (preflightFailure) return preflightFailure;
+
     const initial = await runAttempt(sessionId);
     if (
       sessionId &&

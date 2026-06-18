@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AdapterExecutionContext, ServerAdapterModule } from "@paperclipai/adapter-utils";
 import type { RunProcessResult } from "@paperclipai/adapter-utils/server-utils";
 
@@ -48,6 +48,7 @@ function createRunner(handler?: (script: string) => RunProcessResult) {
 
 function createContext(input: {
   config?: Record<string, unknown>;
+  workspace?: Record<string, unknown>;
   handler?: (script: string) => RunProcessResult;
 } = {}): AdapterExecutionContext & { runnerScripts: string[] } {
   const { runner, scripts } = createRunner(input.handler);
@@ -72,6 +73,7 @@ function createContext(input: {
         repoUrl: "https://github.com/example/repo",
         repoRef: "main",
         name: "paperclip",
+        ...(input.workspace ?? {}),
       },
       paperclipIssue: {
         id: "issue-201",
@@ -112,7 +114,11 @@ function createBaseAdapter(execute = vi.fn<ServerAdapterModule["execute"]>(async
 }
 
 describe("codex_remote wrapper", () => {
-  it("defaults workspace realization to Git clone and a fail-fast timeout without dropping existing config", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("defaults workspace realization to Git clone without dropping existing config", () => {
     expect(applyCodexRemoteDefaults({
       model: "gpt-5.3-codex",
       workspaceRealization: {
@@ -120,7 +126,8 @@ describe("codex_remote wrapper", () => {
       },
     })).toEqual({
       model: "gpt-5.3-codex",
-      timeoutSec: 600,
+      timeoutSec: 300,
+      dangerouslyBypassApprovalsAndSandbox: true,
       workspaceRealization: {
         workspaceStrategy: "git_clone",
         workBranch: "paperclip/RL-203",
@@ -128,10 +135,9 @@ describe("codex_remote wrapper", () => {
     });
   });
 
-  it("preserves an explicit timeoutSec instead of the fail-fast default", () => {
+  it("preserves explicit timeoutSec values and defaults disabled values for testing", () => {
     expect(applyCodexRemoteDefaults({ timeoutSec: 1800 })).toMatchObject({ timeoutSec: 1800 });
-    // A non-positive timeout falls back to the default.
-    expect(applyCodexRemoteDefaults({ timeoutSec: 0 })).toMatchObject({ timeoutSec: 600 });
+    expect(applyCodexRemoteDefaults({ timeoutSec: 0 })).toMatchObject({ timeoutSec: 300 });
   });
 
   it("prepares Git workspace, runs Codex remotely, commits, and pushes", async () => {
@@ -158,6 +164,7 @@ describe("codex_remote wrapper", () => {
     const delegatedCtx = execute.mock.calls[0]?.[0];
     expect(delegatedCtx?.config).toMatchObject({
       model: "gpt-5.3-codex",
+      dangerouslyBypassApprovalsAndSandbox: true,
       workspaceRealization: {
         workspaceStrategy: "git_clone",
       },
@@ -179,6 +186,7 @@ describe("codex_remote wrapper", () => {
         commitSha: "abc123",
         pushed: true,
         pushedBranch: "paperclip/daytona/RL-201",
+        pullRequestSkippedReason: "missing_github_repo_credential",
       },
     });
     expect(ctx.runnerScripts.join("\n")).toContain("git clone --no-checkout");
@@ -202,7 +210,7 @@ describe("codex_remote wrapper", () => {
     expect(result.errorMessage).toContain("repository not found");
   });
 
-  it("does not commit or push when Codex execution fails", async () => {
+  it("finalizes after Codex execution fails so dirty work is still observable", async () => {
     const execute = vi.fn<ServerAdapterModule["execute"]>(async () => ({
       exitCode: 1,
       signal: null,
@@ -215,8 +223,52 @@ describe("codex_remote wrapper", () => {
     const result = await adapter.execute(ctx);
 
     expect(result.errorMessage).toBe("Codex auth failed");
-    expect(ctx.runnerScripts.join("\n")).not.toContain("git status --porcelain=v1");
+    expect(ctx.runnerScripts.join("\n")).toContain("git status --porcelain=v1");
     expect(ctx.runnerScripts.join("\n")).not.toContain("git push origin");
+  });
+
+  it("creates a GitHub pull request after pushing a dirty branch", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ html_url: "https://github.com/example/repo/pull/42" }), {
+        status: 201,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const execute = vi.fn<ServerAdapterModule["execute"]>(async () => ({
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+    }));
+    const adapter = createCodexRemoteAdapter({ base: createBaseAdapter(execute) });
+    const ctx = createContext({
+      workspace: {
+        repoUrl: "https://x-access-token:ghp_testtoken@github.com/example/repo.git",
+      },
+      handler: (script) => {
+        if (script === "git status --porcelain=v1") return ok(" M README.md\n");
+        if (script === "git rev-parse HEAD") return ok("abc123\n");
+        return ok();
+      },
+    });
+
+    const result = await adapter.execute(ctx);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.github.com/repos/example/repo/pulls",
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.objectContaining({
+          authorization: "Bearer ghp_testtoken",
+        }),
+      }),
+    );
+    expect(result.resultJson).toMatchObject({
+      remoteGit: {
+        pullRequestUrl: "https://github.com/example/repo/pull/42",
+        pullRequestCreated: true,
+      },
+    });
   });
 
   it("surfaces push failures after Codex succeeds", async () => {

@@ -920,6 +920,7 @@ describe("sandbox callback bridge", () => {
       { method: "POST", path: "/api/routines/r-1/triggers" },
       { method: "PATCH", path: "/api/routine-triggers/t-1" },
       { method: "DELETE", path: "/api/routine-triggers/t-1" },
+      { method: "POST", path: "/api/heartbeat-runs/run-1/activity" },
     ];
     for (const request of allowed) {
       expect(authorizeSandboxCallbackBridgeRequestWithRoutes(request)).toBeNull();

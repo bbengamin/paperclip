@@ -1264,6 +1264,12 @@ const heartbeatRunIssueSummaryColumns = {
   issueId: sql<string | null>`${heartbeatRuns.contextSnapshot} ->> 'issueId'`.as("issueId"),
 } as const;
 
+const NON_PROGRESS_RUN_EVENT_TYPES = ["lifecycle", "adapter.invoke", "error", "run.alive"] as const;
+
+function nonProgressRunEventTypeSqlList() {
+  return sql.join(NON_PROGRESS_RUN_EVENT_TYPES.map((eventType) => sql`${eventType}`), sql`, `);
+}
+
 function appendExcerpt(prev: string, chunk: string) {
   return appendWithByteCap(prev, chunk, MAX_EXCERPT_BYTES);
 }
@@ -5117,6 +5123,46 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     return updated;
   }
 
+  async function recordRunAlive(
+    runId: string,
+    opts: {
+      actorAgentId?: string | null;
+      source?: string | null;
+      message?: string | null;
+      payload?: Record<string, unknown> | null;
+    } = {},
+  ) {
+    const now = new Date();
+    const updated = await db
+      .update(heartbeatRuns)
+      .set({
+        error: null,
+        errorCode: null,
+        updatedAt: now,
+      })
+      .where(and(
+        eq(heartbeatRuns.id, runId),
+        eq(heartbeatRuns.status, "running"),
+        ...(opts.actorAgentId ? [eq(heartbeatRuns.agentId, opts.actorAgentId)] : []),
+      ))
+      .returning()
+      .then((rows) => rows[0] ?? null);
+    if (!updated) return null;
+
+    await appendRunEvent(updated, await nextRunEventSeq(updated.id), {
+      eventType: "run.alive",
+      stream: "system",
+      level: "info",
+      message: opts.message ?? "sandbox run alive",
+      payload: {
+        source: opts.source ?? "agent",
+        at: now.toISOString(),
+        ...(opts.payload ?? {}),
+      },
+    });
+    return updated;
+  }
+
   async function patchRunIssueCommentStatus(
     runId: string,
     patch: Partial<Pick<typeof heartbeatRuns.$inferInsert, "issueCommentStatus" | "issueCommentSatisfiedByCommentId" | "issueCommentRetryQueuedAt">>,
@@ -7238,8 +7284,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
     const [eventStats] = await db
       .select({
-        count: sql<number>`count(*) filter (where ${heartbeatRunEvents.eventType} not in ('lifecycle', 'adapter.invoke', 'error'))::int`,
-        latestAt: sql<Date | null>`max(${heartbeatRunEvents.createdAt}) filter (where ${heartbeatRunEvents.eventType} not in ('lifecycle', 'adapter.invoke', 'error'))`,
+        count: sql<number>`count(*) filter (where ${heartbeatRunEvents.eventType} not in (${nonProgressRunEventTypeSqlList()}))::int`,
+        latestAt: sql<Date | null>`max(${heartbeatRunEvents.createdAt}) filter (where ${heartbeatRunEvents.eventType} not in (${nonProgressRunEventTypeSqlList()}))`,
       })
       .from(heartbeatRunEvents)
       .where(and(eq(heartbeatRunEvents.companyId, run.companyId), eq(heartbeatRunEvents.runId, run.id)));
@@ -11016,6 +11062,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     triggerIssueMonitor,
 
     reportRunActivity: clearDetachedRunWarning,
+
+    recordRunAlive,
 
     reapOrphanedRuns,
 

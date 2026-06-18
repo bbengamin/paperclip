@@ -33,6 +33,7 @@ export function buildCodexExecArgs(
   options: {
     resumeSessionId?: string | null;
     skipGitRepoCheck?: boolean;
+    isolatePaperclipTaskSystem?: boolean;
   } = {},
 ): BuildCodexExecArgsResult {
   const record = asRecord(config);
@@ -52,6 +53,16 @@ export function buildCodexExecArgs(
 
   const args = ["exec", "--json"];
   if (options.skipGitRepoCheck) args.push("--skip-git-repo-check");
+  if (options.isolatePaperclipTaskSystem) {
+    args.push(
+      "-c",
+      "mcp_servers={}",
+      "-c",
+      "plugins={}",
+      "-c",
+      "marketplaces={}",
+    );
+  }
   if (search) args.unshift("--search");
   if (bypass) args.push("--dangerously-bypass-approvals-and-sandbox");
   if (model) args.push("--model", model);

@@ -34,6 +34,7 @@ import { pluginRegistryService } from "./plugin-registry.js";
 import type { PluginWorkerManager } from "./plugin-worker-manager.js";
 import {
   destroyPluginEnvironmentLease,
+  DEFAULT_ENVIRONMENT_EXECUTE_RPC_TIMEOUT_MS,
   executePluginEnvironmentCommand,
   realizePluginEnvironmentWorkspace,
   resolvePluginSandboxProviderDriverByKey,
@@ -699,6 +700,7 @@ function createSandboxEnvironmentDriver(
           }, resolvePluginExecuteRpcTimeoutMs({
             requestedTimeoutMs: input.timeoutMs,
             config: sanitizedConfig,
+            minimumTimeoutMs: DEFAULT_ENVIRONMENT_EXECUTE_RPC_TIMEOUT_MS,
           }));
         }
       }

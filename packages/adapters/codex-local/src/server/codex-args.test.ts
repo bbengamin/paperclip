@@ -85,4 +85,27 @@ describe("buildCodexExecArgs", () => {
       "-",
     ]);
   });
+
+  it("can isolate sandbox runs from external task-management tools while keeping user config", () => {
+    const result = buildCodexExecArgs(
+      {
+        model: "gpt-5.3-codex",
+      },
+      { isolatePaperclipTaskSystem: true },
+    );
+
+    expect(result.args).toEqual([
+      "exec",
+      "--json",
+      "-c",
+      "mcp_servers={}",
+      "-c",
+      "plugins={}",
+      "-c",
+      "marketplaces={}",
+      "--model",
+      "gpt-5.3-codex",
+      "-",
+    ]);
+  });
 });

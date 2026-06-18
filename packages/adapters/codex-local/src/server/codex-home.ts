@@ -99,6 +99,46 @@ export function sanitizeRemoteCodexConfigToml(toml: string): string {
 }
 
 /**
+ * Injects `supports_websockets = false` into every `[model_providers.<name>]`
+ * section that does not already set the flag. Unlike
+ * {@link sanitizeRemoteCodexConfigToml}, this preserves all other config
+ * content — it is safe to apply to both local and remote config copies.
+ */
+export function injectWebsocketsDisabled(toml: string): string {
+  const lines = toml.split(/\r?\n/);
+  const out: string[] = [];
+  let inProviderMainSection = false;
+  let providerHasWebsocketsFlag = false;
+
+  const closeProviderSection = () => {
+    if (inProviderMainSection && !providerHasWebsocketsFlag) {
+      out.push("supports_websockets = false");
+    }
+    inProviderMainSection = false;
+    providerHasWebsocketsFlag = false;
+  };
+
+  for (const line of lines) {
+    const segments = parseTomlSectionSegments(line);
+    if (segments) {
+      closeProviderSection();
+      inProviderMainSection = segments[0]?.toLowerCase() === REMOTE_KEPT_SECTION_ROOT && segments.length === 2;
+      out.push(line);
+      continue;
+    }
+    if (inProviderMainSection) {
+      const key = /^\s*([A-Za-z0-9_-]+)\s*=/.exec(line);
+      if (key && key[1]!.toLowerCase() === "supports_websockets") {
+        providerHasWebsocketsFlag = true;
+      }
+    }
+    out.push(line);
+  }
+  closeProviderSection();
+  return out.join("\n");
+}
+
+/**
  * Builds a throwaway Codex home directory suitable for syncing into a remote
  * sandbox: the same auth/instructions as the managed home, but with a
  * sandbox-sanitized `config.toml` (see {@link sanitizeRemoteCodexConfigToml}).
@@ -307,6 +347,17 @@ export async function prepareManagedCodexHome(
       if (!(await pathExists(source))) continue;
       if (await ensureCopiedFile(path.join(targetHome, name), source)) {
         refreshedConfigFiles.push(name);
+      }
+    }
+
+    // Ensure Codex uses HTTP transport for model providers — avoids the ~75s
+    // WebSocket retry on every run when the provider doesn't support wss://.
+    const managedConfigToml = path.join(targetHome, "config.toml");
+    if (await pathExists(managedConfigToml)) {
+      const raw = await fs.readFile(managedConfigToml, "utf8");
+      const patched = injectWebsocketsDisabled(raw);
+      if (patched !== raw) {
+        await fs.writeFile(managedConfigToml, patched, { mode: 0o600 });
       }
     }
 

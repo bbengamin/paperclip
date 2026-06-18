@@ -99,7 +99,7 @@ export interface AdapterExecutionTargetPaperclipBridgeHandle {
 
 export { sanitizeRemoteExecutionEnv } from "./remote-execution-env.js";
 
-export const DEFAULT_REMOTE_SANDBOX_ADAPTER_TIMEOUT_SEC = 1_800;
+export const DEFAULT_REMOTE_SANDBOX_ADAPTER_TIMEOUT_SEC = 300;
 
 function parseObject(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -1112,7 +1112,13 @@ export async function startAdapterExecutionTargetPaperclipBridge(input: {
     const client = createCommandManagedSandboxCallbackBridgeQueueClient({
       runner,
       remoteCwd: target.remoteCwd,
-      timeoutMs: bridgeTimeoutMs,
+      // Do NOT pass bridgeTimeoutMs here — that is the total run/bridge lifetime,
+      // not a per-command budget. Individual filesystem polling commands (mkdir,
+      // ls, read, write) are short shell scripts that should finish in well under
+      // a second; giving them the full run timeout causes the Cloudflare
+      // sandbox bridge to hold poll HTTP connections open for minutes,
+      // exhausting the Worker's connection pool and producing "fetch failed".
+      // The client's DEFAULT_BRIDGE_RESPONSE_TIMEOUT_MS is the right cap.
       shellCommand,
     });
     // PAPERCLIP_BRIDGE_DEBUG opts into verbose stdout logs of every bridge
@@ -1168,6 +1174,7 @@ export async function startAdapterExecutionTargetPaperclipBridge(input: {
       bridgeToken,
       bridgeAsset,
       timeoutMs: bridgeTimeoutMs,
+      runId: input.runId,
       maxBodyBytes,
       shellCommand,
     });

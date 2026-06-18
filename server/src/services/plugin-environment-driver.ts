@@ -324,15 +324,18 @@ export async function executePluginEnvironmentCommand(input: {
     resolvePluginExecuteRpcTimeoutMs({
       requestedTimeoutMs: input.params.timeoutMs,
       config: input.config.driverConfig,
+      minimumTimeoutMs: DEFAULT_ENVIRONMENT_EXECUTE_RPC_TIMEOUT_MS,
     }),
   );
 }
 
 const RPC_OVERHEAD_BUFFER_MS = 30_000;
+export const DEFAULT_ENVIRONMENT_EXECUTE_RPC_TIMEOUT_MS = 15 * 60 * 1_000;
 
 export function resolvePluginExecuteRpcTimeoutMs(input: {
   requestedTimeoutMs?: number;
   config: Record<string, unknown>;
+  minimumTimeoutMs?: number;
 }): number | undefined {
   let baseMs: number | undefined;
   if (Number.isFinite(input.requestedTimeoutMs) && (input.requestedTimeoutMs ?? 0) > 0) {
@@ -343,5 +346,10 @@ export function resolvePluginExecuteRpcTimeoutMs(input: {
       baseMs = Math.trunc(configTimeoutMs);
     }
   }
-  return baseMs != null ? baseMs + RPC_OVERHEAD_BUFFER_MS : undefined;
+  if (baseMs == null) return undefined;
+
+  const timeoutMs = baseMs + RPC_OVERHEAD_BUFFER_MS;
+  return input.minimumTimeoutMs != null
+    ? Math.max(timeoutMs, input.minimumTimeoutMs)
+    : timeoutMs;
 }

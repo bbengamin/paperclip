@@ -9,7 +9,8 @@ import type { RunProcessResult } from "./server-utils.js";
 
 const DEFAULT_BRIDGE_TOKEN_BYTES = 24;
 const DEFAULT_BRIDGE_POLL_INTERVAL_MS = 100;
-const DEFAULT_BRIDGE_RESPONSE_TIMEOUT_MS = 30_000;
+const DEFAULT_BRIDGE_RESPONSE_TIMEOUT_MS = 60_000;
+const DEFAULT_BRIDGE_ALIVE_PING_INTERVAL_MS = 30_000;
 const DEFAULT_BRIDGE_STOP_TIMEOUT_MS = 2_000;
 const DEFAULT_BRIDGE_MAX_QUEUE_DEPTH = 64;
 const DEFAULT_BRIDGE_MAX_BODY_BYTES = 256 * 1024;
@@ -95,6 +96,9 @@ export const DEFAULT_SANDBOX_CALLBACK_BRIDGE_ROUTE_ALLOWLIST: readonly SandboxCa
   { method: "POST", path: /^\/api\/routines\/[^/]+\/triggers$/ },
   { method: "PATCH", path: /^\/api\/routine-triggers\/[^/]+$/ },
   { method: "DELETE", path: /^\/api\/routine-triggers\/[^/]+$/ },
+
+  // Run liveness: sandbox bridge pings this while long requests are in flight.
+  { method: "POST", path: /^\/api\/heartbeat-runs\/[^/]+\/activity$/ },
 ] as const;
 
 export const DEFAULT_SANDBOX_CALLBACK_BRIDGE_HEADER_ALLOWLIST = [
@@ -314,6 +318,8 @@ export function buildSandboxCallbackBridgeEnv(input: {
   responseTimeoutMs?: number | null;
   maxQueueDepth?: number | null;
   maxBodyBytes?: number | null;
+  runId?: string | null;
+  alivePingIntervalMs?: number | null;
 }): Record<string, string> {
   return {
     PAPERCLIP_API_BRIDGE_MODE: "queue_v1",
@@ -332,6 +338,10 @@ export function buildSandboxCallbackBridgeEnv(input: {
     ),
     PAPERCLIP_BRIDGE_MAX_BODY_BYTES: String(
       normalizeTimeoutMs(input.maxBodyBytes, DEFAULT_BRIDGE_MAX_BODY_BYTES),
+    ),
+    ...(input.runId?.trim() ? { PAPERCLIP_RUN_ID: input.runId.trim() } : {}),
+    PAPERCLIP_BRIDGE_ALIVE_PING_INTERVAL_MS: String(
+      normalizeTimeoutMs(input.alivePingIntervalMs, DEFAULT_BRIDGE_ALIVE_PING_INTERVAL_MS),
     ),
   };
 }
@@ -616,8 +626,16 @@ export async function startSandboxCallbackBridgeWorker(input: {
   });
   const authorizeRequest = input.authorizeRequest ??
     ((request: SandboxCallbackBridgeRequest) => authorizeSandboxCallbackBridgeRequestWithRoutes(request));
-  const buildWorkerFailureMessage = (error: unknown) =>
-    `Sandbox callback bridge worker failed: ${error instanceof Error ? error.message : String(error)}`;
+  const buildWorkerFailureMessage = (error: unknown) => {
+    const msg = error instanceof Error ? error.message : String(error);
+    const cause = error instanceof Error && (error as { cause?: unknown }).cause;
+    const causeStr = cause instanceof Error ? cause.message : cause != null ? String(cause) : null;
+    return `Sandbox callback bridge worker failed: ${msg}${causeStr ? ` (cause: ${causeStr})` : ""}`;
+  };
+  // Maximum consecutive listJsonFiles poll failures before giving up. Transient
+  // Cloudflare exec errors (e.g. "HTTP error! status: 500") should be retried;
+  // a long run of consecutive failures indicates the sandbox truly died.
+  const MAX_CONSECUTIVE_POLL_ERRORS = 10;
 
   const processRequestFile = async (fileName: string) => {
     const requestPath = path.posix.join(directories.requestsDir, fileName);
@@ -635,7 +653,7 @@ export async function startSandboxCallbackBridgeWorker(input: {
         body: JSON.stringify({ error: "Invalid bridge request payload." }),
         completedAt: new Date().toISOString(),
       });
-      await input.client.remove(requestPath);
+      await input.client.remove(requestPath).catch(() => undefined);
       return;
     }
 
@@ -648,7 +666,7 @@ export async function startSandboxCallbackBridgeWorker(input: {
         body: JSON.stringify({ error: denialReason }),
         completedAt: new Date().toISOString(),
       });
-      await input.client.remove(requestPath);
+      await input.client.remove(requestPath).catch(() => undefined);
       return;
     }
 
@@ -679,7 +697,7 @@ export async function startSandboxCallbackBridgeWorker(input: {
         completedAt: new Date().toISOString(),
       });
     } finally {
-      await input.client.remove(requestPath);
+      await input.client.remove(requestPath).catch(() => undefined);
     }
   };
 
@@ -713,9 +731,30 @@ export async function startSandboxCallbackBridgeWorker(input: {
   };
 
   const loop = (async () => {
+    let consecutivePollErrors = 0;
     try {
       while (true) {
-        const fileNames = await input.client.listJsonFiles(directories.requestsDir);
+        let fileNames: string[];
+        try {
+          fileNames = await input.client.listJsonFiles(directories.requestsDir);
+          consecutivePollErrors = 0;
+        } catch (error) {
+          consecutivePollErrors += 1;
+          const msg = error instanceof Error ? error.message : String(error);
+          if (consecutivePollErrors >= MAX_CONSECUTIVE_POLL_ERRORS) {
+            throw new Error(
+              `Sandbox callback bridge poll failed ${consecutivePollErrors} consecutive times: ${msg}`,
+            );
+          }
+          console.warn(
+            `[paperclip] sandbox callback bridge poll error (${consecutivePollErrors}/${MAX_CONSECUTIVE_POLL_ERRORS}, will retry): ${msg}`,
+          );
+          if (stopping) break;
+          await new Promise((resolve) =>
+            setTimeout(resolve, pollIntervalMs * Math.min(consecutivePollErrors, 10)),
+          );
+          continue;
+        }
         if (fileNames.length === 0) {
           if (stopping) {
             break;
@@ -728,6 +767,13 @@ export async function startSandboxCallbackBridgeWorker(input: {
           inFlight += 1;
           try {
             await processRequestFile(fileName);
+          } catch (error) {
+            // Individual request file processing failed at the infrastructure level
+            // (e.g. transient Cloudflare exec error). Log and continue — the
+            // request file will be retried on the next poll if it still exists.
+            console.warn(
+              `[paperclip] sandbox callback bridge processing failed for ${fileName} (will retry): ${error instanceof Error ? error.message : String(error)}`,
+            );
           } finally {
             inFlight -= 1;
           }
@@ -881,6 +927,8 @@ export async function startSandboxCallbackBridgeServer(input: {
   shellCommand?: "bash" | "sh" | null;
   maxQueueDepth?: number | null;
   maxBodyBytes?: number | null;
+  runId?: string | null;
+  alivePingIntervalMs?: number | null;
 }): Promise<StartedSandboxCallbackBridgeServer> {
   const timeoutMs = normalizeTimeoutMs(input.timeoutMs, DEFAULT_BRIDGE_RESPONSE_TIMEOUT_MS);
   const shellCommand = preferredShellForSandbox(input.shellCommand);
@@ -906,6 +954,8 @@ export async function startSandboxCallbackBridgeServer(input: {
     responseTimeoutMs: input.responseTimeoutMs,
     maxQueueDepth: input.maxQueueDepth,
     maxBodyBytes: input.maxBodyBytes,
+    runId: input.runId,
+    alivePingIntervalMs: input.alivePingIntervalMs,
   });
   const nodeCommand = input.nodeCommand?.trim() || "node";
   const startResult = await input.runner.execute({
@@ -1024,9 +1074,11 @@ const bridgeToken = process.env.PAPERCLIP_BRIDGE_TOKEN;
 const host = process.env.PAPERCLIP_BRIDGE_HOST || "127.0.0.1";
 const port = Number(process.env.PAPERCLIP_BRIDGE_PORT || "0");
 const pollIntervalMs = Number(process.env.PAPERCLIP_BRIDGE_POLL_INTERVAL_MS || "100");
-const responseTimeoutMs = Number(process.env.PAPERCLIP_BRIDGE_RESPONSE_TIMEOUT_MS || "30000");
+const responseTimeoutMs = Number(process.env.PAPERCLIP_BRIDGE_RESPONSE_TIMEOUT_MS || "60000");
 const maxQueueDepth = Number(process.env.PAPERCLIP_BRIDGE_MAX_QUEUE_DEPTH || "${DEFAULT_BRIDGE_MAX_QUEUE_DEPTH}");
 const maxBodyBytes = Number(process.env.PAPERCLIP_BRIDGE_MAX_BODY_BYTES || "${DEFAULT_BRIDGE_MAX_BODY_BYTES}");
+const alivePingIntervalMs = Number(process.env.PAPERCLIP_BRIDGE_ALIVE_PING_INTERVAL_MS || "30000");
+const paperclipRunId = process.env.PAPERCLIP_RUN_ID || "";
 const allowedHeaders = new Set(${JSON.stringify([...DEFAULT_SANDBOX_CALLBACK_BRIDGE_HEADER_ALLOWLIST])});
 
 if (!queueDir || !bridgeToken) {
@@ -1093,6 +1145,38 @@ async function waitForResponse(requestId) {
     await sleep(pollIntervalMs);
   }
   throw new Error("Timed out waiting for host bridge response.");
+}
+
+let alivePingInFlight = false;
+
+async function sendAlivePing() {
+  if (!paperclipRunId || alivePingInFlight) return;
+  alivePingInFlight = true;
+  try {
+    const address = server.address();
+    if (!address || typeof address === "string") return;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), Math.min(responseTimeoutMs, 10000));
+    try {
+      await fetch(\`http://\${host}:\${address.port}/api/heartbeat-runs/\${encodeURIComponent(paperclipRunId)}/activity\`, {
+        method: "POST",
+        headers: {
+          authorization: \`Bearer \${bridgeToken}\`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          source: "sandbox_bridge",
+          status: "alive",
+          at: new Date().toISOString(),
+        }),
+        signal: controller.signal,
+      }).catch(() => undefined);
+    } finally {
+      clearTimeout(timeout);
+    }
+  } finally {
+    alivePingInFlight = false;
+  }
 }
 
 const server = createServer(async (req, res) => {
@@ -1179,5 +1263,8 @@ server.listen(port, host, async () => {
   const tempReadyFile = \`\${readyFile}.tmp\`;
   await fs.writeFile(tempReadyFile, JSON.stringify(ready), "utf8");
   await fs.rename(tempReadyFile, readyFile);
+  if (paperclipRunId && Number.isFinite(alivePingIntervalMs) && alivePingIntervalMs > 0) {
+    setInterval(() => void sendAlivePing(), alivePingIntervalMs).unref();
+  }
 });`;
 }

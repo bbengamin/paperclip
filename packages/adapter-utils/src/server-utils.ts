@@ -115,6 +115,8 @@ export const DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE = [
   "You are agent {{agent.id}} ({{agent.name}}). Continue your Paperclip work.",
   "",
   "Execution contract:",
+  "- Paperclip is the exact task-management system for this run. Do not search for or use Jira, Atlassian, Linear, GitHub Issues, or any other task-management tool even if such tools are visible.",
+  "- Read the assigned Paperclip issue from $PAPERCLIP_API_URL/api/issues/$PAPERCLIP_TASK_ID using Authorization: Bearer $PAPERCLIP_API_KEY. Post progress comments to /api/issues/$PAPERCLIP_TASK_ID/comments and update final issue status with PATCH /api/issues/$PAPERCLIP_TASK_ID.",
   "- Start actionable work in this heartbeat; do not stop at a plan unless the issue asks for planning.",
   "- Leave durable progress in comments, documents, or work products, then update the issue to a clear final disposition before ending the heartbeat.",
   "- Comments, documents, screenshots, work products, and `Remaining` bullets are evidence, not valid liveness paths by themselves.",

@@ -24,10 +24,13 @@ const codexPaperclipLocalUIAdapter: UIAdapterModule = {
   label: "Codex (Paperclip local)",
 };
 
+import { CodexRemoteConfigFields } from "./codex-remote/config-fields";
+
 const codexRemoteUIAdapter: UIAdapterModule = {
   ...codexLocalUIAdapter,
   type: "codex_remote",
   label: "Codex (remote)",
+  ConfigFields: CodexRemoteConfigFields,
   buildAdapterConfig: (values) => ({
     ...codexLocalUIAdapter.buildAdapterConfig(values),
     workspaceRealization: {

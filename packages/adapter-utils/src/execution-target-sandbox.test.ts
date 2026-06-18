@@ -496,7 +496,7 @@ describe("sandbox adapter execution targets", () => {
     try {
       expect(bridge).not.toBeNull();
       expect(runner.execute).toHaveBeenCalled();
-      expect(runner.execute.mock.calls.some(([input]) => input.timeoutMs === 1_800_000)).toBe(true);
+      expect(runner.execute.mock.calls.some(([input]) => input.timeoutMs === DEFAULT_REMOTE_SANDBOX_ADAPTER_TIMEOUT_SEC * 1000)).toBe(true);
     } finally {
       await bridge?.stop();
       await new Promise<void>((resolve) => apiServer.close(() => resolve()));
