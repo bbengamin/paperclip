@@ -51,6 +51,7 @@ import { buildCodexExecArgs } from "./codex-args.js";
 import { SANDBOX_INSTALL_COMMAND } from "../index.js";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
+const SANDBOX_GLOBAL_CODEX_HOME = "/root/.codex";
 const CODEX_ROLLOUT_NOISE_RE =
   /^\d{4}-\d{2}-\d{2}T[^\s]+\s+ERROR\s+codex_core::rollout::list:\s+state db missing rollout path for thread\s+[a-z0-9-]+$/i;
 
@@ -182,6 +183,10 @@ async function runSandboxPaperclipPreflight(input: {
   const script = [
     "set -eu",
     "mkdir -p .paperclip-runtime/codex",
+    'if [ -n "${CODEX_HOME:-}" ]; then',
+    '  test -f "$CODEX_HOME/config.toml"',
+    '  test ! -f "$CODEX_HOME/auth.json"',
+    'fi',
     "probe_file=.paperclip-runtime/codex/preflight-write-check",
     "printf '%s\\n' paperclip-preflight > \"$probe_file\"",
     "rm -f \"$probe_file\"",
@@ -226,6 +231,56 @@ async function runSandboxPaperclipPreflight(input: {
 function resolveCodexBillingType(env: Record<string, string>): "api" | "subscription" {
   // Codex uses API-key auth when OPENAI_API_KEY is present; otherwise rely on local login/session auth.
   return hasNonEmptyEnvValue(env, "OPENAI_API_KEY") ? "api" : "subscription";
+}
+
+async function installSandboxGlobalCodexHome(input: {
+  runId: string;
+  target: ReturnType<typeof overrideAdapterExecutionTargetRemoteCwd>;
+  sourceRemoteHome: string | null;
+  timeoutSec: number;
+  onLog: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
+}): Promise<string | null> {
+  if (!input.target || input.target.kind !== "remote" || input.target.transport !== "sandbox" || !input.sourceRemoteHome) {
+    return null;
+  }
+
+  const script = [
+    "set -eu",
+    `src=${JSON.stringify(input.sourceRemoteHome)}`,
+    `dst=${JSON.stringify(SANDBOX_GLOBAL_CODEX_HOME)}`,
+    'test -d "$src"',
+    'rm -rf "$dst"',
+    'mkdir -p "$dst"',
+    'cp -a "$src"/. "$dst"/',
+    'rm -f "$dst/auth.json"',
+    'chmod 700 "$dst"',
+    'find "$dst" -type f -exec chmod 600 {} \\;',
+    'test -f "$dst/config.toml"',
+    'test ! -f "$dst/auth.json"',
+  ].join("\n");
+
+  const result = await runAdapterExecutionTargetShellCommand(
+    input.runId,
+    input.target,
+    script,
+    {
+      cwd: "/",
+      env: {},
+      timeoutSec: Math.min(Math.max(input.timeoutSec, 1), 30),
+      onLog: input.onLog,
+    },
+  );
+
+  if (!result.timedOut && result.exitCode === 0) {
+    return SANDBOX_GLOBAL_CODEX_HOME;
+  }
+
+  const detail = [result.stderr.trim(), result.stdout.trim()].filter(Boolean).join("\n");
+  throw new Error(
+    result.timedOut
+      ? "Timed out while installing sandbox global Codex home."
+      : `Failed to install sandbox global Codex home${detail ? `: ${detail}` : "."}`,
+  );
 }
 
 function resolveCodexBiller(env: Record<string, string>, billingType: "api" | "subscription"): string {
@@ -633,6 +688,16 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     ? preparedExecutionTargetRuntime?.assetDirs.home ??
       path.posix.join(effectiveExecutionCwd, ".paperclip-runtime", "codex", "home")
     : null;
+  const sandboxGlobalCodexHome = await installSandboxGlobalCodexHome({
+    runId,
+    target: runtimeExecutionTarget,
+    sourceRemoteHome: remoteCodexHome,
+    timeoutSec,
+    onLog,
+  });
+  await logRemoteTiming(sandboxGlobalCodexHome
+    ? `installed sandbox global Codex home at ${sandboxGlobalCodexHome}`
+    : "using synced remote CODEX_HOME");
   const hasExplicitApiKey =
     typeof envConfig.PAPERCLIP_API_KEY === "string" && envConfig.PAPERCLIP_API_KEY.trim().length > 0;
   const env: Record<string, string> = { ...buildPaperclipEnv(agent) };
@@ -713,11 +778,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   }
   // Point Codex at the synced remote home (which carries config.toml — including
   // the model_provider/base_url and any bearer token — plus auth.json) so a
-  // provider-realized remote Git sandbox uses the configured provider instead of
-  // falling back to the default api.openai.com endpoint. `remoteCodexHome` is the
-  // remote location of the synced `effectiveCodexHome` (which already reflects an
-  // explicit CODEX_HOME override), so this remapping preserves configured homes.
-  env.CODEX_HOME = remoteCodexHome ?? effectiveCodexHome;
+  // provider-realized remote sandbox uses the configured provider instead of
+  // falling back to the default api.openai.com endpoint. Sandbox runs use the
+  // user-level /root/.codex home because Codex treats that as the trusted global
+  // provider config; SSH remotes keep the synced runtime home.
+  env.CODEX_HOME = sandboxGlobalCodexHome ?? remoteCodexHome ?? effectiveCodexHome;
+  if (sandboxGlobalCodexHome) {
+    env.HOME = path.posix.dirname(sandboxGlobalCodexHome);
+  }
   if (!hasExplicitApiKey && authToken) {
     env.PAPERCLIP_API_KEY = authToken;
   }

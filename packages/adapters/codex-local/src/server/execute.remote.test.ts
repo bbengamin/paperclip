@@ -11,6 +11,8 @@ const {
   restoreWorkspaceFromSshExecution,
   syncDirectoryToSsh,
   startAdapterExecutionTargetPaperclipBridge,
+  prepareAdapterExecutionTargetRuntimeMock,
+  runAdapterExecutionTargetShellCommand,
 } = vi.hoisted(() => ({
   runChildProcess: vi.fn(async () => ({
     exitCode: 1,
@@ -33,6 +35,16 @@ const {
       PAPERCLIP_API_BRIDGE_MODE: "queue_v1",
     },
     stop: async () => {},
+  })),
+  prepareAdapterExecutionTargetRuntimeMock: vi.fn(),
+  runAdapterExecutionTargetShellCommand: vi.fn(async () => ({
+    exitCode: 0,
+    signal: null,
+    timedOut: false,
+    stdout: "",
+    stderr: "",
+    pid: null,
+    startedAt: new Date().toISOString(),
   })),
 }));
 
@@ -66,6 +78,10 @@ vi.mock("@paperclipai/adapter-utils/execution-target", async () => {
   );
   return {
     ...actual,
+    prepareAdapterExecutionTargetRuntime: prepareAdapterExecutionTargetRuntimeMock.mockImplementation(
+      actual.prepareAdapterExecutionTargetRuntime,
+    ),
+    runAdapterExecutionTargetShellCommand,
     startAdapterExecutionTargetPaperclipBridge,
   };
 });
@@ -621,5 +637,98 @@ describe("codex remote execution", () => {
     ]);
     expect(call?.[3].env.CODEX_HOME).toBe(`${managedRemoteWorkspace}/.paperclip-runtime/codex/home`);
     expect(call?.[3].remoteExecution?.remoteCwd).toBe(managedRemoteWorkspace);
+  });
+
+  it("installs sandbox Codex config into the user-level global home", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-sandbox-global-home-"));
+    cleanupDirs.push(rootDir);
+    const workspaceDir = path.join(rootDir, "workspace");
+    const codexHomeDir = path.join(rootDir, "codex-home");
+    await mkdir(workspaceDir, { recursive: true });
+    await mkdir(codexHomeDir, { recursive: true });
+    await writeFile(path.join(codexHomeDir, "config.toml"), 'model = "gpt-5"\n', "utf8");
+    await writeFile(path.join(codexHomeDir, "auth.json"), "{}", "utf8");
+
+    prepareAdapterExecutionTargetRuntimeMock.mockResolvedValueOnce({
+      target: {
+        kind: "remote",
+        transport: "sandbox",
+        providerKey: "cloudflare",
+        leaseId: "lease-1",
+        remoteCwd: "/workspace/paperclip",
+      },
+      workspaceRemoteDir: "/workspace/paperclip",
+      runtimeRootDir: "/workspace/paperclip/.paperclip-runtime/codex",
+      assetDirs: {
+        home: "/workspace/paperclip/.paperclip-runtime/codex/home",
+      },
+      restoreWorkspace: async () => {},
+    });
+
+    await execute({
+      runId: "run-sandbox-global-home",
+      agent: {
+        id: "agent-1",
+        companyId: "company-1",
+        name: "CodexCoder",
+        adapterType: "codex_local",
+        adapterConfig: {},
+      },
+      runtime: {
+        sessionId: null,
+        sessionParams: null,
+        sessionDisplayId: null,
+        taskKey: null,
+      },
+      config: {
+        command: "codex",
+        env: {
+          CODEX_HOME: codexHomeDir,
+        },
+      },
+      context: {
+        paperclipWorkspace: {
+          cwd: workspaceDir,
+          source: "project_primary",
+        },
+      },
+      executionTarget: {
+        kind: "remote",
+        transport: "sandbox",
+        providerKey: "cloudflare",
+        leaseId: "lease-1",
+        remoteCwd: "/workspace/paperclip",
+        runner: {
+          execute: vi.fn(async () => ({
+            exitCode: 0,
+            signal: null,
+            timedOut: false,
+            stdout: "",
+            stderr: "",
+            pid: null,
+            startedAt: new Date().toISOString(),
+          })),
+        },
+      },
+      onLog: async () => {},
+    });
+
+    expect(runAdapterExecutionTargetShellCommand).toHaveBeenCalledWith(
+      "run-sandbox-global-home",
+      expect.objectContaining({ transport: "sandbox" }),
+      expect.stringContaining('dst="/root/.codex"'),
+      expect.objectContaining({ cwd: "/" }),
+    );
+    expect(runAdapterExecutionTargetShellCommand).toHaveBeenCalledWith(
+      "run-sandbox-global-home",
+      expect.objectContaining({ transport: "sandbox" }),
+      expect.stringContaining('test ! -f "$CODEX_HOME/auth.json"'),
+      expect.objectContaining({
+        env: expect.objectContaining({
+          CODEX_HOME: "/root/.codex",
+          HOME: "/root",
+        }),
+      }),
+    );
   });
 });
