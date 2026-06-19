@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
+import { linkSdkInto } from "./link-plugin-dev-sdk.mjs";
 
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const pluginsRoot = join(repoRoot, "packages", "plugins");
@@ -17,6 +18,7 @@ for (const packageRoot of findPluginPackageRoots(pluginsRoot)) {
 
   if (packageDir.startsWith("packages/plugins/sandbox-providers/")) {
     run("npm", ["install", "--no-audit", "--no-fund", "--package-lock=false"], packageRoot);
+    linkSdkInto(packageRoot);
     run("npm", ["run", "build"], packageRoot);
     continue;
   }
