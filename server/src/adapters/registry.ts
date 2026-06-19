@@ -518,7 +518,8 @@ Runtime rules:
 
 Required operator setup:
 - select a Cloudflare sandbox environment for the agent
-- ensure that environment can access the configured project repoUrl
+- select the Codebase that contains the clean Git repository URL
+- configure GITHUB_TOKEN or GH_TOKEN in the agent env when the repository is private or PR creation is enabled
 - rely on this adapter's workspace realization hint so the sandbox run uses Git clone/fetch instead of archive sync
 
 Use codex_local for local or SSH execution where Paperclip should use the existing local/remote filesystem workflow.

@@ -5,7 +5,7 @@
 Use it when:
 
 - the agent should work inside a remote sandbox environment
-- the project has a configured Git `repoUrl`
+- the agent has a Codebase configured with the Git repository URL
 - the sandbox can clone and push the repository
 - you want to avoid full workspace archive upload/download
 
@@ -58,14 +58,13 @@ Create or select a sandbox environment backed by a provider that supports comman
 The sandbox environment must have:
 
 - provider API access configured
-- repo credentials available to the sandbox
-- a project workspace with `repoUrl` metadata
-- explicit Git credentials for clone/push when the repo is private
+- a Codebase selected on the agent so Paperclip can provide the clean repository URL
+- `GITHUB_TOKEN` or `GH_TOKEN` configured in the agent environment when the repo is private or PR creation is enabled
 - Codex runtime credentials/config available to the remote Codex home sync path
 
 Manual connection testing is still required before migrating live agents.
 
-Do not put board/browser credentials in the sandbox. Git credentials should be scoped to clone/push for the configured repo, and Codex credentials should be supplied through the remote environment or explicit adapter env.
+Do not put board/browser credentials in the sandbox. Do not embed GitHub tokens in the repository URL. Git credentials should be scoped to clone/push for the configured repo and supplied as env vars, and Codex credentials should be supplied through the remote environment or explicit adapter env.
 
 ## Migration
 

@@ -14,7 +14,6 @@ import { processUIAdapter } from "./process";
 import { httpUIAdapter } from "./http";
 import { loadDynamicParser, invalidateDynamicParser, setDynamicParserResultNotifier } from "./dynamic-loader";
 import { SchemaConfigFields, buildSchemaAdapterConfig } from "./schema-config-fields";
-import { CodexRemoteConfigFields } from "./codex-remote/config-fields";
 
 const uiAdapters: UIAdapterModule[] = [];
 const adaptersByType = new Map<string, UIAdapterModule>();
@@ -23,7 +22,6 @@ const codexRemoteUIAdapter: UIAdapterModule = {
   ...codexLocalUIAdapter,
   type: "codex_remote",
   label: "Codex (remote)",
-  ConfigFields: CodexRemoteConfigFields,
   buildAdapterConfig: (values) => ({
     ...codexLocalUIAdapter.buildAdapterConfig(values),
     workspaceRealization: {

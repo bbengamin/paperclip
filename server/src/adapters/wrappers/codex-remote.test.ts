@@ -194,7 +194,7 @@ describe("codex_remote wrapper", () => {
     });
     expect(ctx.runnerScripts.join("\n")).toContain("git clone --no-checkout");
     expect(ctx.runnerScripts.join("\n")).toContain("git checkout -B 'paperclip/cloudflare/RL-201' FETCH_HEAD");
-    expect(ctx.runnerScripts.join("\n")).toContain("git push origin HEAD:refs/heads/'paperclip/cloudflare/RL-201'");
+    expect(ctx.runnerScripts.join("\n")).toContain("git push \"$auth_repo_url\" HEAD:refs/heads/'paperclip/cloudflare/RL-201'");
     expect(ctx.runnerScripts.join("\n")).not.toMatch(/\btar\b|base64|workspace-upload|workspace-download/);
   });
 
@@ -245,8 +245,10 @@ describe("codex_remote wrapper", () => {
     }));
     const adapter = createCodexRemoteAdapter({ base: createBaseAdapter(execute) });
     const ctx = createContext({
-      workspace: {
-        repoUrl: "https://x-access-token:ghp_testtoken@github.com/example/repo.git",
+      config: {
+        env: {
+          GITHUB_TOKEN: "ghp_testtoken",
+        },
       },
       handler: (script) => {
         if (script === "git status --porcelain=v1") return ok(" M README.md\n");
@@ -300,8 +302,10 @@ describe("codex_remote wrapper", () => {
     const adapter = createCodexRemoteAdapter({ base: createBaseAdapter(execute) });
     const ctx = createContext({
       authToken: "run-jwt-token",
-      workspace: {
-        repoUrl: "https://x-access-token:ghp_testtoken@github.com/example/repo.git",
+      config: {
+        env: {
+          GITHUB_TOKEN: "ghp_testtoken",
+        },
       },
       handler: (script) => {
         if (script === "git status --porcelain=v1") return ok(" M README.md\n");
@@ -366,8 +370,10 @@ describe("codex_remote wrapper", () => {
     const adapter = createCodexRemoteAdapter({ base: createBaseAdapter(execute) });
     const ctx = createContext({
       authToken: "run-jwt-token",
-      workspace: {
-        repoUrl: "https://x-access-token:ghp_testtoken@github.com/example/repo.git",
+      config: {
+        env: {
+          GITHUB_TOKEN: "ghp_testtoken",
+        },
       },
       handler: (script) => {
         if (script === "git status --porcelain=v1") return ok(" M README.md\n");
@@ -409,7 +415,7 @@ describe("codex_remote wrapper", () => {
       handler: (script) => {
         if (script === "git status --porcelain=v1") return ok(" M README.md\n");
         if (script === "git rev-parse HEAD") return ok("abc123\n");
-        if (script.includes("git push origin")) return fail("permission denied");
+        if (script.includes("git push \"$auth_repo_url\"")) return fail("permission denied");
         return ok();
       },
     });

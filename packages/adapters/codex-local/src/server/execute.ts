@@ -88,7 +88,7 @@ function sanitizeCodexProgressMessage(text: string): string {
     .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
     .replace(/x-access-token:[^@\s]+@/gi, "x-access-token:[redacted]@")
     .replace(/\b(?:github_pat|ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]+/g, "[redacted-token]")
-    .replace(/\b(?:PAPERCLIP_API_KEY|OPENAI_API_KEY|GITHUB_TOKEN)=\S+/g, "$1=[redacted]")
+    .replace(/\b(?:PAPERCLIP_API_KEY|OPENAI_API_KEY|GITHUB_TOKEN|GH_TOKEN)=\S+/g, "$1=[redacted]")
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean)

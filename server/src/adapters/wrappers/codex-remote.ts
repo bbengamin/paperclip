@@ -71,13 +71,22 @@ function requireSandboxTarget(ctx: AdapterExecutionContext): CodexRemoteSandboxT
   return target as CodexRemoteSandboxTarget;
 }
 
-function readRemoteGitSafetyPolicy(config: Record<string, unknown>): RemoteGitSandboxSafetyPolicy | null {
+function readRemoteGitApprovedEnv(config: Record<string, unknown>): Record<string, string> {
   const remoteGit = asRecord(config.remoteGitSandbox);
   const safety = asRecord(remoteGit.safety);
-  const approvedEnv = {
+  const configEnv = asStringRecord(config.env);
+  return {
+    ...(configEnv.GITHUB_TOKEN ? { GITHUB_TOKEN: configEnv.GITHUB_TOKEN } : {}),
+    ...(configEnv.GH_TOKEN ? { GH_TOKEN: configEnv.GH_TOKEN } : {}),
     ...asStringRecord(remoteGit.env),
     ...asStringRecord(safety.approvedEnv),
   };
+}
+
+function readRemoteGitSafetyPolicy(config: Record<string, unknown>): RemoteGitSandboxSafetyPolicy | null {
+  const remoteGit = asRecord(config.remoteGitSandbox);
+  const safety = asRecord(remoteGit.safety);
+  const approvedEnv = readRemoteGitApprovedEnv(config);
   return {
     ...(Array.isArray(safety.allowedRepoUrls)
       ? { allowedRepoUrls: safety.allowedRepoUrls.filter((value): value is string => typeof value === "string") }
@@ -109,7 +118,7 @@ function failureResult(error: unknown, prefix: string): AdapterExecutionResult {
   };
 }
 
-function readGitHubRepoCredential(repoUrl: string): GitHubRepoCredential | null {
+function readGitHubRepoCredential(repoUrl: string, env: Record<string, string> = {}): GitHubRepoCredential | null {
   let parsed: URL;
   try {
     parsed = new URL(repoUrl);
@@ -121,7 +130,11 @@ function readGitHubRepoCredential(repoUrl: string): GitHubRepoCredential | null 
   if (parts.length < 2) return null;
   const owner = parts[0]?.trim();
   const repo = parts[1]?.replace(/\.git$/i, "").trim();
-  const token = decodeURIComponent(parsed.password || parsed.username || "").trim();
+  const token = (
+    env.GITHUB_TOKEN ??
+    env.GH_TOKEN ??
+    decodeURIComponent(parsed.password || parsed.username || "")
+  ).trim();
   if (!owner || !repo || !token) return null;
   return { owner, repo, token };
 }
@@ -243,12 +256,13 @@ async function closeOutPaperclipIssueFromHost(input: {
 
 async function createOrReuseGitHubPullRequest(input: {
   repoUrl: string;
+  env?: Record<string, string>;
   baseRef: string;
   workBranch: string;
   title: string;
   body: string;
 }): Promise<RemoteGitPullRequestResult> {
-  const credential = readGitHubRepoCredential(input.repoUrl);
+  const credential = readGitHubRepoCredential(input.repoUrl, input.env);
   if (!credential) {
     return {
       created: false,
@@ -338,6 +352,7 @@ export async function executeCodexRemote(input: {
   const config = applyCodexRemoteDefaults(input.ctx.config);
   const workspaceRealization = asRecord(config.workspaceRealization);
   const remoteGit = asRecord(config.remoteGitSandbox);
+  const remoteGitEnv = readRemoteGitApprovedEnv(config);
   const workspaceContext = asRecord(input.ctx.context.paperclipWorkspace);
   const issueContext = asRecord(input.ctx.context.paperclipIssue);
   const issueId = readString(issueContext.id) ?? readString(input.ctx.context.issueId);
@@ -462,6 +477,7 @@ export async function executeCodexRemote(input: {
       if (finalize.pushed && remoteGit.createPr !== false) {
         pullRequest = await createOrReuseGitHubPullRequest({
           repoUrl: sandbox.spec.repoUrl,
+          env: remoteGitEnv,
           baseRef: sandbox.spec.baseRef,
           workBranch: sandbox.spec.workBranch,
           title: readString(remoteGit.prTitle) ?? `Paperclip remote work ${sandbox.spec.workBranch}`,

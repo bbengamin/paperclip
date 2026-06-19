@@ -88,6 +88,17 @@ function shellQuote(value: string) {
   return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
 
+function remoteGitAuthShellPrelude(repoUrl: string): string {
+  return [
+    `repo_url=${shellQuote(repoUrl)}`,
+    "auth_repo_url=\"$repo_url\"",
+    "git_token=\"${GITHUB_TOKEN:-${GH_TOKEN:-}}\"",
+    "if [ -n \"$git_token\" ] && printf '%s' \"$repo_url\" | grep -Eq '^https://github[.]com/'; then",
+    "  auth_repo_url=\"https://x-access-token:${git_token}@${repo_url#https://}\"",
+    "fi",
+  ].join("\n");
+}
+
 function shArgs(script: string): string[] {
   return ["-lc", script];
 }
@@ -271,21 +282,25 @@ export async function prepareRemoteGitSandbox(input: {
   const gitDir = `${input.spec.remoteCwd.replace(/\/+$/g, "")}/.git`;
   await runShell(
     [
+      remoteGitAuthShellPrelude(input.spec.repoUrl),
       `mkdir -p ${shellQuote(input.spec.remoteCwd.replace(/\/[^/]*$/g, "") || "/")}`,
       `if [ -d ${shellQuote(gitDir)} ]; then`,
       `  cd ${shellQuote(input.spec.remoteCwd)}`,
       `  git remote set-url origin ${shellQuote(input.spec.repoUrl)}`,
-      "  git fetch origin --prune",
+      "  git fetch --prune \"$auth_repo_url\"",
       "else",
       `  rm -rf ${shellQuote(input.spec.remoteCwd)}`,
-      `  git clone --no-checkout ${shellQuote(input.spec.repoUrl)} ${shellQuote(input.spec.remoteCwd)}`,
+      `  git clone --no-checkout "$auth_repo_url" ${shellQuote(input.spec.remoteCwd)}`,
+      `  cd ${shellQuote(input.spec.remoteCwd)}`,
+      `  git remote set-url origin ${shellQuote(input.spec.repoUrl)}`,
       "fi",
     ].join("\n"),
   );
 
   await runShell(
     [
-      `git fetch origin ${shellQuote(input.spec.baseRef)}`,
+      remoteGitAuthShellPrelude(input.spec.repoUrl),
+      `git fetch "$auth_repo_url" ${shellQuote(input.spec.baseRef)}`,
       `if git show-ref --verify --quiet refs/heads/${shellQuote(input.spec.workBranch)}; then`,
       `  git checkout ${shellQuote(input.spec.workBranch)}`,
       "else",
@@ -374,7 +389,10 @@ export async function prepareRemoteGitSandbox(input: {
 
     if (options.push !== false && dirty) {
       await runShell(
-        `git push origin HEAD:refs/heads/${shellQuote(input.spec.workBranch)}`,
+        [
+          remoteGitAuthShellPrelude(input.spec.repoUrl),
+          `git push "$auth_repo_url" HEAD:refs/heads/${shellQuote(input.spec.workBranch)}`,
+        ].join("\n"),
         input.spec.remoteCwd,
         options.timeoutMs ?? timeoutMs,
       );

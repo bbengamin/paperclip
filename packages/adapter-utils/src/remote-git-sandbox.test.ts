@@ -101,10 +101,10 @@ describe("remote Git sandbox", () => {
       pushedBranch: "paperclip/RL-199",
     });
     expect(runner.scripts.join("\n")).toContain("git clone --no-checkout");
-    expect(runner.scripts.join("\n")).toContain("git fetch origin 'main'");
+    expect(runner.scripts.join("\n")).toContain("git fetch \"$auth_repo_url\" 'main'");
     expect(runner.scripts.join("\n")).toContain("git checkout -B 'paperclip/RL-199' FETCH_HEAD");
     expect(runner.scripts.join("\n")).toContain("pnpm install");
-    expect(runner.scripts.join("\n")).toContain("git push origin HEAD:refs/heads/'paperclip/RL-199'");
+    expect(runner.scripts.join("\n")).toContain("git push \"$auth_repo_url\" HEAD:refs/heads/'paperclip/RL-199'");
     // A fresh sandbox has no git identity; ensure we set a repo-local one so
     // commits don't abort with "Author identity unknown".
     expect(runner.scripts.join("\n")).toContain("git config user.email");
@@ -166,7 +166,7 @@ describe("remote Git sandbox", () => {
     const runner = createRunner((script) => {
       if (script === "git status --porcelain=v1") return ok(" M package.json\n");
       if (script === "git rev-parse HEAD") return ok("def456\n");
-      if (script.includes("git push origin")) return fail("permission denied");
+      if (script.includes("git push \"$auth_repo_url\"")) return fail("permission denied");
       return ok();
     });
 
@@ -245,6 +245,38 @@ describe("remote Git sandbox", () => {
     expect(runner.envs.every((env) => env?.PAPERCLIP_API_KEY === "run-key-123456789")).toBe(true);
     expect(runner.envs.every((env) => env?.HOME === "/Users/local")).toBe(true);
     expect(runner.envs.every((env) => !("PATH" in (env ?? {})))).toBe(true);
+  });
+
+  it("uses approved GitHub token env for clean HTTPS repository URLs", async () => {
+    const runner = createRunner((script) => {
+      if (script === "git status --porcelain=v1") return ok("\n");
+      return ok();
+    });
+
+    const sandbox = await prepareRemoteGitSandbox({
+      runner,
+      spec: {
+        repoUrl: "https://github.com/example/repo.git",
+        baseRef: "main",
+        workBranch: "paperclip/RL-203",
+        remoteCwd: "/sandbox/repo",
+        setupCommand: null,
+        cleanupCommand: null,
+      },
+      safety: {
+        approvedEnv: {
+          GITHUB_TOKEN: "ghp_testtoken_123456789",
+        },
+      },
+    });
+    await sandbox.finalize();
+
+    const scripts = runner.scripts.join("\n");
+    expect(scripts).toContain("git_token=\"${GITHUB_TOKEN:-${GH_TOKEN:-}}\"");
+    expect(scripts).toContain("auth_repo_url=\"https://x-access-token:${git_token}@${repo_url#https://}\"");
+    expect(scripts).toContain("git remote set-url origin 'https://github.com/example/repo.git'");
+    expect(scripts).not.toContain("ghp_testtoken_123456789");
+    expect(runner.envs.every((env) => env?.GITHUB_TOKEN === "ghp_testtoken_123456789")).toBe(true);
   });
 
   it("rejects wrong repos and protected branch push targets before running commands", async () => {
