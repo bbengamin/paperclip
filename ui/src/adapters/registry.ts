@@ -14,17 +14,10 @@ import { processUIAdapter } from "./process";
 import { httpUIAdapter } from "./http";
 import { loadDynamicParser, invalidateDynamicParser, setDynamicParserResultNotifier } from "./dynamic-loader";
 import { SchemaConfigFields, buildSchemaAdapterConfig } from "./schema-config-fields";
+import { CodexRemoteConfigFields } from "./codex-remote/config-fields";
 
 const uiAdapters: UIAdapterModule[] = [];
 const adaptersByType = new Map<string, UIAdapterModule>();
-
-const codexPaperclipLocalUIAdapter: UIAdapterModule = {
-  ...codexLocalUIAdapter,
-  type: "codex_paperclip_local",
-  label: "Codex (Paperclip local)",
-};
-
-import { CodexRemoteConfigFields } from "./codex-remote/config-fields";
 
 const codexRemoteUIAdapter: UIAdapterModule = {
   ...codexLocalUIAdapter,
@@ -37,18 +30,6 @@ const codexRemoteUIAdapter: UIAdapterModule = {
       workspaceStrategy: "git_clone",
     },
   }),
-};
-
-const hermesPaperclipLocalUIAdapter: UIAdapterModule = {
-  ...hermesLocalUIAdapter,
-  type: "hermes_paperclip_local",
-  label: "Hermes Agent (Paperclip local)",
-};
-
-const openCodePaperclipLocalUIAdapter: UIAdapterModule = {
-  ...openCodeLocalUIAdapter,
-  type: "opencode_paperclip_local",
-  label: "OpenCode (Paperclip local)",
 };
 
 // Types registered at module load time — allowed to be overridden by
@@ -89,14 +70,11 @@ function registerBuiltInUIAdapters() {
     claudeLocalUIAdapter,
     codexLocalUIAdapter,
     codexRemoteUIAdapter,
-    codexPaperclipLocalUIAdapter,
     cursorCloudUIAdapter,
     geminiLocalUIAdapter,
     grokLocalUIAdapter,
     hermesLocalUIAdapter,
-    hermesPaperclipLocalUIAdapter,
     openCodeLocalUIAdapter,
-    openCodePaperclipLocalUIAdapter,
     piLocalUIAdapter,
     cursorLocalUIAdapter,
     openClawGatewayUIAdapter,

@@ -47,8 +47,6 @@ diagnostics/
 .paperclip-local/
 /.idea/
 /.agents/
-/.claude/
-skills-lock.json
 
 # Doc maintenance cursor
 .doc-review-cursor

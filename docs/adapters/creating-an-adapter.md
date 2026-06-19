@@ -240,25 +240,6 @@ With these flags set, the Paperclip UI will automatically show the instructions 
 
 If capability flags are not set, the server falls back to legacy hardcoded lists for built-in adapter types. External adapters that omit the flags will default to `false` for all capabilities.
 
-## Paperclip-Specific Wrapper Utilities
-
-When an adapter needs Paperclip-owned runtime policy, keep that policy in a thin wrapper instead of mixing it into the generic runtime adapter. The wrapper should compose the native adapter and use shared helpers from `@paperclipai/adapter-utils/paperclip-wrapper`.
-
-Use these helpers for common wrapper behavior:
-
-| Helper | Purpose |
-|--------|---------|
-| `applyPaperclipRuntimeEnv()` | Adds `PAPERCLIP_RUN_ID` and an agent-scoped `PAPERCLIP_API_KEY` without replacing an explicit API key. |
-| `composePaperclipPromptGuard()` | Prepends the Paperclip API safety prompt, with an option to inject only when a runtime prompt already exists. |
-| `resolvePaperclipRuntimeStateStrategy()` | Chooses native, configured, or managed runtime state for local, SSH, sandbox, and credential-isolated runs. |
-
-Wrapper rules:
-
-- Keep native adapter types generic. Put deployment-specific auth, prompt, runtime-state, or session-recovery policy in explicit wrapper adapter types.
-- Keep wrappers removable. If the upstream adapter later owns the same behavior natively, the wrapper should be deletable by removing its registration/package/module.
-- Keep wrappers extensible. New runtime wrappers should reuse the shared helper layer and add only runtime-specific composition.
-- Do not silently change existing agents. Add wrapper adapter types first, then migrate agents deliberately.
-
 ## Remote Git Sandbox Utilities
 
 Remote adapters that intentionally run in an ephemeral hosted sandbox can use `@paperclipai/adapter-utils/remote-git-sandbox` instead of uploading and downloading a full workspace archive.

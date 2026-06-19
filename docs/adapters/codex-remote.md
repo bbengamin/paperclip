@@ -1,6 +1,6 @@
 # Codex Remote
 
-`codex_remote` runs Codex in a remote Git-backed sandbox workflow. It is intended for Daytona or similar sandboxes where the sandbox should clone/fetch the repository directly, run Codex in that checkout, then commit and push the resulting work branch.
+`codex_remote` runs Codex in a remote Git-backed sandbox workflow. It is intended for sandbox providers such as Cloudflare or Daytona where the sandbox can clone/fetch the repository directly, run Codex in that checkout, then commit and push the resulting work branch.
 
 Use it when:
 
@@ -16,7 +16,7 @@ Use `codex_local` when:
 - the project is not Git-backed
 - the sandbox provider is not configured for Git-clone realization
 
-## Daytona Git-Clone Flow
+## Git-Clone Sandbox Flow
 
 When the UI creates a `codex_remote` agent, its adapter config includes:
 
@@ -28,7 +28,7 @@ When the UI creates a `codex_remote` agent, its adapter config includes:
 }
 ```
 
-During environment realization, Paperclip passes that hint to the environment provider as workspace metadata. The Daytona provider treats it as `workspaceStrategy: "git_clone"` and clones or fetches the project repo inside the sandbox instead of creating a workspace folder for archive sync.
+During environment realization, Paperclip passes that hint to the environment provider as workspace metadata. Providers that support Git-clone realization can use it to clone or fetch the project repo inside the sandbox instead of creating a workspace folder for archive sync.
 
 During adapter execution, `codex_remote` also runs its own remote Git lifecycle through the shared remote Git sandbox layer:
 
@@ -42,24 +42,26 @@ During adapter execution, `codex_remote` also runs its own remote Git lifecycle 
 The expected flow is:
 
 1. Agent wakes up.
-2. Paperclip acquires a Daytona sandbox lease.
-3. Daytona clones/fetches the project repo in the sandbox.
-4. Daytona checks out a work branch such as `paperclip/daytona/<issue>`.
+2. Paperclip acquires or resumes a sandbox lease.
+3. The `codex_remote` wrapper clones/fetches the project repo in the sandbox.
+4. The wrapper checks out a work branch such as `paperclip/daytona/<issue>`.
 5. Codex runs in that sandbox checkout.
-6. Remote work is committed and pushed through the Git-backed sandbox flow.
-7. The sandbox lease is released according to the environment policy.
+6. Plugin stream events send Codex stdout/stderr progress back to Paperclip while Codex runs.
+7. Remote work is committed and pushed through the Git-backed sandbox flow.
+8. If configured, Paperclip opens or reuses a GitHub PR and marks the issue done from the host.
+9. The sandbox lease is released or allowed to sleep according to the environment policy.
 
 ## Operator Setup
 
-Create or select a sandbox environment backed by the Daytona provider.
+Create or select a sandbox environment backed by a provider that supports command execution and the Paperclip sandbox bridge.
 
-The Daytona environment must have:
+The sandbox environment must have:
 
-- API access configured
+- provider API access configured
 - repo credentials available to the sandbox
-- `workspaceStrategy: "git_clone"` in provider config, or a provider version that honors the adapter metadata hint
 - a project workspace with `repoUrl` metadata
 - explicit Git credentials for clone/push when the repo is private
+- Codex runtime credentials/config available to the remote Codex home sync path
 
 Manual connection testing is still required before migrating live agents.
 
