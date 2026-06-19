@@ -50,6 +50,7 @@ function createContext(input: {
   config?: Record<string, unknown>;
   workspace?: Record<string, unknown>;
   handler?: (script: string) => RunProcessResult;
+  authToken?: string;
 } = {}): AdapterExecutionContext & { runnerScripts: string[] } {
   const { runner, scripts } = createRunner(input.handler);
   return {
@@ -91,6 +92,7 @@ function createContext(input: {
       runner,
     },
     onLog: async () => {},
+    authToken: input.authToken,
     runnerScripts: scripts,
   };
 }
@@ -116,6 +118,7 @@ function createBaseAdapter(execute = vi.fn<ServerAdapterModule["execute"]>(async
 describe("codex_remote wrapper", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
   });
 
   it("defaults workspace realization to Git clone without dropping existing config", () => {
@@ -267,6 +270,130 @@ describe("codex_remote wrapper", () => {
       remoteGit: {
         pullRequestUrl: "https://github.com/example/repo/pull/42",
         pullRequestCreated: true,
+      },
+    });
+  });
+
+  it("marks the Paperclip issue done from the host after opening a pull request", async () => {
+    vi.stubEnv("PAPERCLIP_API_URL", "http://paperclip.local/");
+    const fetchMock = vi.fn(async (url: string, _init?: RequestInit) => {
+      if (url === "https://api.github.com/repos/example/repo/pulls") {
+        return new Response(JSON.stringify({ html_url: "https://github.com/example/repo/pull/42" }), {
+          status: 201,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (url === "http://paperclip.local/api/issues/issue-201") {
+        return new Response(JSON.stringify({ id: "issue-201", status: "done" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response("unexpected url", { status: 500 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const execute = vi.fn<ServerAdapterModule["execute"]>(async () => ({
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+    }));
+    const adapter = createCodexRemoteAdapter({ base: createBaseAdapter(execute) });
+    const ctx = createContext({
+      authToken: "run-jwt-token",
+      workspace: {
+        repoUrl: "https://x-access-token:ghp_testtoken@github.com/example/repo.git",
+      },
+      handler: (script) => {
+        if (script === "git status --porcelain=v1") return ok(" M README.md\n");
+        if (script === "git rev-parse HEAD") return ok("abc123\n");
+        return ok();
+      },
+    });
+
+    const result = await adapter.execute(ctx);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://paperclip.local/api/issues/issue-201",
+      expect.objectContaining({
+        method: "PATCH",
+        headers: expect.objectContaining({
+          authorization: "Bearer run-jwt-token",
+          "content-type": "application/json",
+        }),
+        body: expect.any(String),
+      }),
+    );
+    const patchCall = fetchMock.mock.calls.find(([url]) => url === "http://paperclip.local/api/issues/issue-201");
+    const patchBody = JSON.parse(String((patchCall?.[1] as RequestInit | undefined)?.body));
+    expect(patchBody).toMatchObject({ status: "done" });
+    expect(patchBody.comment).toContain("https://github.com/example/repo/pull/42");
+    expect(patchBody.comment).toContain("paperclip/daytona/RL-201");
+    expect(result.resultJson).toMatchObject({
+      remoteGit: {
+        paperclipCloseout: {
+          attempted: true,
+          ok: true,
+        },
+      },
+    });
+  });
+
+  it("reports success when host close-out succeeds after the base adapter failed late", async () => {
+    vi.stubEnv("PAPERCLIP_API_URL", "http://paperclip.local");
+    const fetchMock = vi.fn(async (url: string, _init?: RequestInit) => {
+      if (url === "https://api.github.com/repos/example/repo/pulls") {
+        return new Response(JSON.stringify({ html_url: "https://github.com/example/repo/pull/43" }), {
+          status: 201,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (url === "http://paperclip.local/api/issues/issue-201") {
+        return new Response(JSON.stringify({ id: "issue-201", status: "done" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response("unexpected url", { status: 500 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const execute = vi.fn<ServerAdapterModule["execute"]>(async () => ({
+      exitCode: 1,
+      signal: null,
+      timedOut: false,
+      errorMessage: "callback bridge timed out after finishing",
+      errorCode: "sandbox_callback_timeout",
+    }));
+    const adapter = createCodexRemoteAdapter({ base: createBaseAdapter(execute) });
+    const ctx = createContext({
+      authToken: "run-jwt-token",
+      workspace: {
+        repoUrl: "https://x-access-token:ghp_testtoken@github.com/example/repo.git",
+      },
+      handler: (script) => {
+        if (script === "git status --porcelain=v1") return ok(" M README.md\n");
+        if (script === "git rev-parse HEAD") return ok("def456\n");
+        return ok();
+      },
+    });
+
+    const result = await adapter.execute(ctx);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.timedOut).toBe(false);
+    expect(result.errorMessage).toBeNull();
+    expect(result.errorCode).toBeNull();
+    expect(result.resultJson).toMatchObject({
+      codexRemoteOriginalResult: {
+        exitCode: 1,
+        errorMessage: "callback bridge timed out after finishing",
+        errorCode: "sandbox_callback_timeout",
+      },
+      remoteGit: {
+        commitSha: "def456",
+        pullRequestUrl: "https://github.com/example/repo/pull/43",
+        paperclipCloseout: {
+          ok: true,
+        },
       },
     });
   });

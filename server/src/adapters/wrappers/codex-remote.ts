@@ -53,6 +53,13 @@ interface RemoteGitPullRequestResult {
   skippedReason: string | null;
 }
 
+interface PaperclipCloseoutResult {
+  attempted: boolean;
+  ok: boolean;
+  skippedReason: string | null;
+  error: string | null;
+}
+
 function requireSandboxTarget(ctx: AdapterExecutionContext): CodexRemoteSandboxTarget {
   const target = ctx.executionTarget;
   if (!target || target.kind !== "remote" || target.transport !== "sandbox") {
@@ -117,6 +124,121 @@ function readGitHubRepoCredential(repoUrl: string): GitHubRepoCredential | null 
   const token = decodeURIComponent(parsed.password || parsed.username || "").trim();
   if (!owner || !repo || !token) return null;
   return { owner, repo, token };
+}
+
+function resolveHostPaperclipApiUrl(): string | null {
+  const apiUrl = process.env.PAPERCLIP_API_URL?.trim();
+  return apiUrl && apiUrl.length > 0 ? apiUrl.replace(/\/+$/, "") : null;
+}
+
+function buildPaperclipCloseoutComment(input: {
+  branch: string;
+  prUrl: string;
+  commitSha: string | null;
+}) {
+  return [
+    `Completed the remote sandbox work and opened the GitHub PR: ${input.prUrl}`,
+    "",
+    `Branch: ${input.branch}`,
+    input.commitSha ? `Commit: ${input.commitSha}` : null,
+  ].filter((line): line is string => line !== null).join("\n");
+}
+
+function resultSucceeded(result: AdapterExecutionResult): boolean {
+  return result.exitCode === 0 && !result.timedOut && !result.errorMessage && !result.errorCode;
+}
+
+function completedResultFromHostCloseout(input: {
+  result: AdapterExecutionResult;
+  prUrl: string;
+}): AdapterExecutionResult {
+  if (resultSucceeded(input.result)) return input.result;
+  return {
+    ...input.result,
+    exitCode: 0,
+    signal: null,
+    timedOut: false,
+    errorMessage: null,
+    errorCode: null,
+    errorFamily: null,
+    retryNotBefore: null,
+    errorMeta: undefined,
+    summary: input.result.summary ?? `Completed remote work and opened ${input.prUrl}`,
+    resultJson: {
+      ...(input.result.resultJson ?? {}),
+      codexRemoteOriginalResult: {
+        exitCode: input.result.exitCode,
+        signal: input.result.signal,
+        timedOut: input.result.timedOut,
+        errorMessage: input.result.errorMessage ?? null,
+        errorCode: input.result.errorCode ?? null,
+        errorFamily: input.result.errorFamily ?? null,
+        retryNotBefore: input.result.retryNotBefore ?? null,
+        errorMeta: input.result.errorMeta ?? null,
+      },
+    },
+  };
+}
+
+async function closeOutPaperclipIssueFromHost(input: {
+  ctx: AdapterExecutionContext;
+  issueId: string | null;
+  prUrl: string | null;
+  branch: string;
+  commitSha: string | null;
+}): Promise<PaperclipCloseoutResult> {
+  if (!input.issueId) {
+    return { attempted: false, ok: false, skippedReason: "missing_issue_id", error: null };
+  }
+  if (!input.prUrl) {
+    return { attempted: false, ok: false, skippedReason: "missing_pull_request_url", error: null };
+  }
+  const authToken = input.ctx.authToken?.trim();
+  if (!authToken) {
+    return { attempted: false, ok: false, skippedReason: "missing_auth_token", error: null };
+  }
+  const apiUrl = resolveHostPaperclipApiUrl();
+  if (!apiUrl) {
+    return { attempted: false, ok: false, skippedReason: "missing_paperclip_api_url", error: null };
+  }
+
+  const body = {
+    status: "done",
+    comment: buildPaperclipCloseoutComment({
+      branch: input.branch,
+      prUrl: input.prUrl,
+      commitSha: input.commitSha,
+    }),
+  };
+
+  try {
+    const response = await fetch(`${apiUrl}/api/issues/${encodeURIComponent(input.issueId)}`, {
+      method: "PATCH",
+      headers: {
+        authorization: `Bearer ${authToken}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!response.ok) {
+      const detail = await response.text().catch(() => "");
+      return {
+        attempted: true,
+        ok: false,
+        skippedReason: null,
+        error: `Paperclip close-out failed with HTTP ${response.status}${detail ? `: ${detail.slice(0, 500)}` : ""}`,
+      };
+    }
+    return { attempted: true, ok: true, skippedReason: null, error: null };
+  } catch (error) {
+    return {
+      attempted: true,
+      ok: false,
+      skippedReason: null,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
 }
 
 async function createOrReuseGitHubPullRequest(input: {
@@ -218,6 +340,8 @@ export async function executeCodexRemote(input: {
   const remoteGit = asRecord(config.remoteGitSandbox);
   const workspaceContext = asRecord(input.ctx.context.paperclipWorkspace);
   const issueContext = asRecord(input.ctx.context.paperclipIssue);
+  const issueId = readString(issueContext.id) ?? readString(input.ctx.context.issueId);
+  const issueIdentifier = readString(issueContext.identifier) ?? readString(input.ctx.context.issueIdentifier);
   const timeoutMs =
     typeof remoteGit.timeoutMs === "number" && Number.isFinite(remoteGit.timeoutMs) && remoteGit.timeoutMs > 0
       ? Math.trunc(remoteGit.timeoutMs)
@@ -232,8 +356,8 @@ export async function executeCodexRemote(input: {
       cleanupCommand: readString(remoteGit.cleanupCommand),
     },
     issue: {
-      id: readString(issueContext.id) ?? readString(input.ctx.context.issueId),
-      identifier: readString(issueContext.identifier) ?? readString(input.ctx.context.issueIdentifier),
+      id: issueId,
+      identifier: issueIdentifier,
     },
     remoteRootDir: readString(remoteGit.remoteRootDir) ?? (target.remoteCwd.replace(/\/+[^/]*$/, "") || "/workspaces"),
     remoteCwd: readString(workspaceRealization.remoteCwd) ?? readString(remoteGit.remoteCwd) ?? target.remoteCwd,
@@ -319,10 +443,16 @@ export async function executeCodexRemote(input: {
         },
       },
     });
-    const result = await input.base.execute(patchedCtx);
+    let result: AdapterExecutionResult;
+    try {
+      result = await input.base.execute(patchedCtx);
+    } catch (error) {
+      result = failureResult(error, "codex_remote_execute_failed");
+    }
 
     let finalize;
     let pullRequest: RemoteGitPullRequestResult | null = null;
+    let closeout: PaperclipCloseoutResult | null = null;
     try {
       finalize = await sandbox.finalize({
         commitMessage: readString(remoteGit.commitMessage) ?? `Paperclip Codex Remote ${sandbox.spec.workBranch}`,
@@ -344,6 +474,13 @@ export async function executeCodexRemote(input: {
             ].join("\n"),
         });
       }
+      closeout = await closeOutPaperclipIssueFromHost({
+        ctx: input.ctx,
+        issueId,
+        prUrl: pullRequest?.url ?? null,
+        branch: sandbox.spec.workBranch,
+        commitSha: finalize.commitSha,
+      });
     } catch (error) {
       return failureResult(error, "codex_remote_finalize_failed");
     }
@@ -352,11 +489,20 @@ export async function executeCodexRemote(input: {
       "stdout",
       `[paperclip] git finalize: dirty=${finalize.dirty} pushed=${finalize.pushed} branch=${finalize.pushedBranch ?? "none"} sha=${finalize.commitSha ?? "none"}\n`,
     );
+    if (closeout?.ok) {
+      await input.ctx.onLog("stdout", "[paperclip] host close-out marked the Paperclip issue done.\n");
+    } else if (closeout?.attempted && closeout.error) {
+      await input.ctx.onLog("stderr", `[paperclip] host close-out failed: ${closeout.error}\n`);
+    }
+
+    const finalResult = closeout?.ok && pullRequest?.url
+      ? completedResultFromHostCloseout({ result, prUrl: pullRequest.url })
+      : result;
 
     return {
-      ...result,
+      ...finalResult,
       resultJson: {
-        ...(result.resultJson ?? {}),
+        ...(finalResult.resultJson ?? {}),
         remoteGit: {
           dirty: finalize.dirty,
           status: finalize.status,
@@ -366,6 +512,7 @@ export async function executeCodexRemote(input: {
           pullRequestUrl: pullRequest?.url ?? null,
           pullRequestCreated: pullRequest?.created ?? false,
           pullRequestSkippedReason: pullRequest?.skippedReason ?? null,
+          paperclipCloseout: closeout,
           repoUrl: sandbox.spec.repoUrl,
           baseRef: sandbox.spec.baseRef,
           workBranch: sandbox.spec.workBranch,
