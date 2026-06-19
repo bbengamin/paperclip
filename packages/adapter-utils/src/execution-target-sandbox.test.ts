@@ -449,6 +449,82 @@ describe("sandbox adapter execution targets", () => {
     }
   });
 
+  it("reports successful sandbox activity requests to the adapter callback", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-execution-target-bridge-activity-"));
+    cleanupDirs.push(rootDir);
+    const remoteCwd = path.join(rootDir, "workspace");
+    const runtimeRootDir = path.join(remoteCwd, ".paperclip-runtime", "codex");
+    await mkdir(runtimeRootDir, { recursive: true });
+
+    const apiServer = createServer((req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true }));
+    });
+    await new Promise<void>((resolve, reject) => {
+      apiServer.once("error", reject);
+      apiServer.listen(0, "127.0.0.1", () => resolve());
+    });
+    const address = apiServer.address();
+    if (!address || typeof address === "string") {
+      throw new Error("Expected the bridge activity test API server to listen on a TCP port.");
+    }
+
+    const activities: unknown[] = [];
+    const target: AdapterSandboxExecutionTarget = {
+      kind: "remote",
+      transport: "sandbox",
+      providerKey: "cloudflare",
+      environmentId: "env-1",
+      leaseId: "lease-1",
+      remoteCwd,
+      runner: createLocalSandboxRunner(),
+      timeoutMs: 30_000,
+    };
+
+    const bridge = await startAdapterExecutionTargetPaperclipBridge({
+      runId: "run-activity",
+      target,
+      runtimeRootDir,
+      adapterKey: "codex",
+      hostApiToken: "real-run-jwt",
+      hostApiUrl: `http://127.0.0.1:${address.port}`,
+      onActivity: async (activity) => {
+        activities.push(activity);
+      },
+    });
+    try {
+      const response = await fetch(`${bridge!.env.PAPERCLIP_API_URL}/api/heartbeat-runs/run-activity/activity`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${bridge!.env.PAPERCLIP_API_KEY}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          source: "sandbox_bridge",
+          status: "alive",
+          message: "sandbox run alive",
+          at: "2026-06-18T14:00:00.000Z",
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      expect(activities).toEqual([expect.objectContaining({
+        runId: "run-activity",
+        source: "sandbox_bridge",
+        status: "alive",
+        message: "sandbox run alive",
+        at: "2026-06-18T14:00:00.000Z",
+        payload: expect.objectContaining({
+          source: "sandbox_bridge",
+          status: "alive",
+        }),
+      })]);
+    } finally {
+      await bridge?.stop();
+      await new Promise<void>((resolve) => apiServer.close(() => resolve()));
+    }
+  });
+
   it("uses the effective adapter timeout when starting the sandbox callback bridge", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-execution-target-bridge-timeout-"));
     cleanupDirs.push(rootDir);

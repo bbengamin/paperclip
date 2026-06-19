@@ -18,8 +18,11 @@ import {
   createDb,
   environmentLeases,
   environments,
+  executionWorkspaces,
   heartbeatRuns,
+  issues,
   plugins,
+  projects,
 } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
@@ -116,7 +119,7 @@ describeEmbeddedPostgres("environmentRuntimeService", () => {
     stopDb = started.stop;
     db = createDb(started.connectionString);
     runtime = environmentRuntimeService(db);
-  });
+  }, 60_000);
 
   afterEach(async () => {
     while (fixtureRoots.length > 0) {
@@ -126,10 +129,13 @@ describeEmbeddedPostgres("environmentRuntimeService", () => {
       await rm(root, { recursive: true, force: true }).catch(() => undefined);
     }
     await db.delete(environmentLeases);
+    await db.delete(issues);
+    await db.delete(executionWorkspaces);
     await db.delete(heartbeatRuns);
     await db.delete(agents);
     await db.delete(environments);
     await db.delete(plugins);
+    await db.delete(projects);
     await db.delete(companySecretVersions);
     await db.delete(companySecrets);
     await db.delete(companies);
@@ -137,7 +143,7 @@ describeEmbeddedPostgres("environmentRuntimeService", () => {
 
   afterAll(async () => {
     await stopDb?.();
-  });
+  }, 60_000);
 
   async function seedEnvironment(input: {
     driver?: string;
@@ -530,8 +536,187 @@ describeEmbeddedPostgres("environmentRuntimeService", () => {
     expect(executed.stdout).toBe("ok\n");
     expect(released).toHaveLength(1);
     expect(released[0]?.lease.status).toBe("released");
-    expect(workerManager.call).toHaveBeenCalledWith(pluginId, "environmentExecute", expect.anything(), 900000);
+    expect(workerManager.call).toHaveBeenCalledWith(pluginId, "environmentExecute", expect.anything(), 31000);
     expect(workerManager.call).toHaveBeenCalledWith(pluginId, "environmentReleaseLease", expect.anything(), 31234);
+  });
+
+  it("retains and resumes issue-scoped plugin sandbox leases after run failure", async () => {
+    const pluginId = randomUUID();
+    const { companyId, environment: baseEnvironment, runId } = await seedEnvironment();
+    const [{ agentId }] = await db.select({ agentId: heartbeatRuns.agentId }).from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+    const issueId = randomUUID();
+    const nextRunId = randomUUID();
+    const projectId = randomUUID();
+    const firstExecutionWorkspaceId = randomUUID();
+    const nextExecutionWorkspaceId = randomUUID();
+    const fakePluginConfig = {
+      provider: "fake-plugin",
+      image: "fake:test",
+      timeoutMs: 1234,
+      reuseLease: false,
+    };
+    const environment = {
+      ...baseEnvironment,
+      name: "Retained Plugin Sandbox",
+      driver: "sandbox",
+      config: fakePluginConfig,
+    };
+    await environmentService(db).update(environment.id, {
+      driver: "sandbox",
+      name: environment.name,
+      config: fakePluginConfig,
+    });
+    await db.insert(heartbeatRuns).values({
+      id: nextRunId,
+      companyId,
+      agentId,
+      invocationSource: "manual",
+      status: "running",
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    } as any);
+    await db.insert(projects).values({
+      id: projectId,
+      companyId,
+      name: "Retained sandbox project",
+      status: "in_progress",
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    } as any);
+    await db.insert(executionWorkspaces).values({
+      id: firstExecutionWorkspaceId,
+      companyId,
+      projectId,
+      mode: "shared_workspace",
+      strategyType: "project_primary",
+      name: "Initial retained workspace",
+      status: "active",
+      providerType: "local_fs",
+      cwd: "/tmp/retained-initial",
+      metadata: {},
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    } as any);
+    await db.insert(executionWorkspaces).values({
+      id: nextExecutionWorkspaceId,
+      companyId,
+      projectId,
+      mode: "shared_workspace",
+      strategyType: "project_primary",
+      name: "Retained continuation workspace",
+      status: "active",
+      providerType: "local_fs",
+      cwd: "/tmp/retained-continuation",
+      metadata: {},
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    } as any);
+    await db.insert(plugins).values({
+      id: pluginId,
+      pluginKey: "paperclip.retained-plugin-sandbox-provider",
+      packageName: "@paperclipai/plugin-retained-sandbox",
+      version: "1.0.0",
+      apiVersion: 1,
+      categories: ["automation"],
+      manifestJson: {
+        id: "paperclip.retained-plugin-sandbox-provider",
+        apiVersion: 1,
+        version: "1.0.0",
+        displayName: "Retained Plugin Sandbox Provider",
+        description: "Test retained plugin provider",
+        author: "Paperclip",
+        categories: ["automation"],
+        capabilities: ["environment.drivers.register"],
+        entrypoints: { worker: "dist/worker.js" },
+        environmentDrivers: [
+          {
+            driverKey: "fake-plugin",
+            kind: "sandbox_provider",
+            displayName: "Fake Plugin",
+            configSchema: { type: "object" },
+          },
+        ],
+      },
+      status: "ready",
+      installOrder: 1,
+      updatedAt: new Date(),
+    } as any);
+    const workerManager = {
+      isRunning: vi.fn((id: string) => id === pluginId),
+      call: vi.fn(async (_pluginId: string, method: string, params: any) => {
+        if (method === "environmentAcquireLease") {
+          return {
+            providerLeaseId: "sandbox-retained-1",
+            metadata: {
+              provider: "fake-plugin",
+              image: "fake:test",
+              timeoutMs: 1234,
+              reuseLease: false,
+              remoteCwd: "/workspace",
+            },
+          };
+        }
+        if (method === "environmentResumeLease") {
+          expect(params.providerLeaseId).toBe("sandbox-retained-1");
+          return {
+            providerLeaseId: "sandbox-retained-1",
+            metadata: {
+              provider: "fake-plugin",
+              image: "fake:test",
+              timeoutMs: 1234,
+              reuseLease: false,
+              remoteCwd: "/workspace",
+              resumedLease: true,
+            },
+          };
+        }
+        if (method === "environmentReleaseLease") {
+          throw new Error("retained failed leases must not release provider state");
+        }
+        throw new Error(`Unexpected plugin method: ${method}`);
+      }),
+    } as unknown as PluginWorkerManager;
+    const runtimeWithPlugin = environmentRuntimeService(db, { pluginWorkerManager: workerManager });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      projectId,
+      title: "Retain failed sandbox",
+      status: "in_progress",
+      priority: "medium",
+      assigneeAgentId: agentId,
+      executionRunId: runId,
+    });
+
+    const acquired = await runtimeWithPlugin.acquireRunLease({
+      companyId,
+      environment,
+      issueId,
+      heartbeatRunId: runId,
+      persistedExecutionWorkspace: {
+        id: firstExecutionWorkspaceId,
+        mode: "shared_workspace",
+      },
+    });
+    const retained = await runtimeWithPlugin.releaseRunLeases(runId, "failed");
+    const resumed = await runtimeWithPlugin.acquireRunLease({
+      companyId,
+      environment,
+      issueId,
+      heartbeatRunId: nextRunId,
+      persistedExecutionWorkspace: {
+        id: nextExecutionWorkspaceId,
+        mode: "shared_workspace",
+      },
+    });
+
+    expect(acquired.lease.leasePolicy).toBe("retain_on_failure");
+    expect(retained[0]?.lease.status).toBe("retained");
+    expect(retained[0]?.lease.cleanupStatus).toBe("pending");
+    expect(resumed.lease.providerLeaseId).toBe("sandbox-retained-1");
+    expect(resumed.lease.metadata).toMatchObject({ resumedLease: true });
+    expect(workerManager.call).not.toHaveBeenCalledWith(pluginId, "environmentReleaseLease", expect.anything(), expect.anything());
+    expect(workerManager.call).toHaveBeenCalledWith(pluginId, "environmentResumeLease", expect.anything(), 31234);
   });
 
   it("uses resolved secret-ref config for plugin-backed sandbox execute and release", async () => {
@@ -677,7 +862,7 @@ describeEmbeddedPostgres("environmentRuntimeService", () => {
       config: expect.objectContaining({
         apiKey: "resolved-provider-key",
       }),
-    }), 900000);
+    }), 31234);
     expect(workerManager.call).toHaveBeenCalledWith(pluginId, "environmentReleaseLease", expect.objectContaining({
       config: expect.objectContaining({
         apiKey: "resolved-provider-key",
@@ -1326,7 +1511,7 @@ describeEmbeddedPostgres("environmentRuntimeService", () => {
       args: ["ok"],
       cwd: "/workspace/project",
       env: { FOO: "bar" },
-    }), 900000);
+    }), 31234);
     expect(workerManager.call).toHaveBeenCalledWith(pluginId, "environmentDestroyLease", {
       driverKey: "fake-plugin",
       companyId,

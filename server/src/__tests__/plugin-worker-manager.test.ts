@@ -142,6 +142,44 @@ describe("plugin-worker-manager stderr failure context", () => {
     }
   });
 
+  it("keeps environmentExecute alive when sandbox stream progress is not publishable", async () => {
+    const handle = createPluginWorkerHandle("test.plugin", {
+      entrypointPath: DELAYED_WORKER_ENTRYPOINT,
+      manifest: TEST_MANIFEST,
+      config: {},
+      instanceInfo: {
+        instanceId: "instance-1",
+        hostVersion: "1.0.0",
+      },
+      apiVersion: 1,
+      hostHandlers: {},
+      rpcTimeoutMs: 25,
+    });
+
+    try {
+      await handle.start();
+
+      await expect(handle.call("environmentExecute", {
+        driverKey: "e2b",
+        companyId: "company-1",
+        environmentId: "environment-1",
+        config: {},
+        lease: { providerLeaseId: "lease-1" },
+        command: "echo",
+        delayMs: 80,
+        progressIntervalMs: 10,
+      } as HostToWorkerMethods["environmentExecute"][0] & {
+        delayMs: number;
+        progressIntervalMs: number;
+      })).resolves.toMatchObject({
+        exitCode: 0,
+        stdout: "ok\n",
+      });
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
   it("does not emit an unhandled rejection when a plugin responds with terminated before callers attach handlers", async () => {
     const unhandledRejection = vi.fn();
     process.on("unhandledRejection", unhandledRejection);

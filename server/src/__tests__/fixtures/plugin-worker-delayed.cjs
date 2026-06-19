@@ -28,7 +28,28 @@ rl.on("line", (line) => {
 
   if (method === "environmentExecute") {
     const delayMs = Number(message.params?.delayMs ?? 0);
+    const progressIntervalMs = Number(message.params?.progressIntervalMs ?? 0);
+    let progressTimer = null;
+    if (progressIntervalMs > 0) {
+      const providerLeaseId = message.params?.lease?.providerLeaseId;
+      const companyId = message.params?.companyId;
+      progressTimer = setInterval(() => {
+        send({
+          jsonrpc: "2.0",
+          method: "streams.emit",
+          params: {
+            channel: providerLeaseId ? `environment-execute:${providerLeaseId}` : "",
+            companyId,
+            event: {
+              stream: "stdout",
+              chunk: "progress\n",
+            },
+          },
+        });
+      }, progressIntervalMs);
+    }
     setTimeout(() => {
+      if (progressTimer) clearInterval(progressTimer);
       send({
         jsonrpc: "2.0",
         id: message.id,

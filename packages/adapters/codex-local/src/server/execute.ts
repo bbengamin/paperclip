@@ -83,6 +83,90 @@ function hasNonEmptyEnvValue(env: Record<string, string>, key: string): boolean 
   return typeof raw === "string" && raw.trim().length > 0;
 }
 
+function sanitizeCodexProgressMessage(text: string): string {
+  return text
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
+    .replace(/x-access-token:[^@\s]+@/gi, "x-access-token:[redacted]@")
+    .replace(/\b(?:github_pat|ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]+/g, "[redacted-token]")
+    .replace(/\b(?:PAPERCLIP_API_KEY|OPENAI_API_KEY|GITHUB_TOKEN)=\S+/g, "$1=[redacted]")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join(" ")
+    .slice(0, 500)
+    .trim();
+}
+
+function summarizeCodexProgressMessage(text: string): string {
+  const sanitized = sanitizeCodexProgressMessage(text);
+  if (sanitized.length <= 100) return sanitized;
+  return `${sanitized.slice(0, 100).trimEnd()}...`;
+}
+
+function readCodexProgressFromJsonLine(line: string): string | null {
+  let event: unknown;
+  try {
+    event = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  const parsed = parseObject(event);
+  const type = asString(parsed.type, "");
+
+  if (type === "turn.started") {
+    return "Codex turn started";
+  }
+  if (type === "turn.completed") {
+    return "Codex turn completed";
+  }
+
+  if (type !== "item.started" && type !== "item.completed") {
+    return null;
+  }
+
+  const item = parseObject(parsed.item);
+  const itemType = asString(item.type, "");
+  if (itemType === "agent_message") {
+    return summarizeCodexProgressMessage(asString(item.text, ""));
+  }
+  if (itemType === "command_execution") {
+    return type === "item.started" ? "Running a shell command" : "Shell command completed";
+  }
+  if (itemType === "file_change" && type === "item.completed") {
+    return "Applied file changes";
+  }
+  if (itemType === "tool_use") {
+    const name = summarizeCodexProgressMessage(asString(item.name, "tool"));
+    return type === "item.started" ? `Using ${name}` : `${name} completed`;
+  }
+
+  return null;
+}
+
+function collectCodexProgressMessages(input: { buffer: string; chunk: string }): {
+  buffer: string;
+  messages: string[];
+} {
+  const combined = input.buffer + input.chunk;
+  const lines = combined.split(/\r?\n/);
+  const nextBuffer = lines.pop() ?? "";
+  const messages = lines
+    .map((line) => readCodexProgressFromJsonLine(line.trim()))
+    .filter((message): message is string => Boolean(message));
+  return { buffer: nextBuffer, messages };
+}
+
+function buildCodexSyntheticProgressJsonl(input: { id: number; message: string }): string {
+  return `${JSON.stringify({
+    type: "item.completed",
+    item: {
+      id: `paperclip_progress_${input.id}`,
+      type: "agent_message",
+      text: input.message,
+    },
+  })}\n`;
+}
+
 async function runSandboxPaperclipPreflight(input: {
   runId: string;
   target: ReturnType<typeof readAdapterExecutionTarget>;
@@ -225,8 +309,32 @@ type EnsureCodexSkillsInjectedOptions = {
   skillsHome?: string;
   skillsEntries?: Array<{ key: string; runtimeName: string; source: string }>;
   desiredSkillNames?: string[];
+  injectionMode?: "symlink" | "copy";
   linkSkill?: (source: string, target: string) => Promise<void>;
 };
+
+function isFilesystemPermissionError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const code = (error as { code?: unknown }).code;
+  return code === "EPERM" || code === "EACCES";
+}
+
+async function copyCodexSkillFallback(
+  source: string,
+  target: string,
+  options: { repairExisting?: boolean } = {},
+): Promise<"created" | "repaired" | "skipped"> {
+  const existing = await fs.lstat(target).catch(() => null);
+  if (existing?.isSymbolicLink()) {
+    await fs.unlink(target);
+  } else if (existing?.isDirectory() && options.repairExisting === true) {
+    await fs.rm(target, { recursive: true, force: true });
+  } else if (existing) {
+    return "skipped";
+  }
+  await fs.cp(source, target, { recursive: true, dereference: true });
+  return existing ? "repaired" : "created";
+}
 
 type CodexTransientFallbackMode =
   | "same_session"
@@ -288,10 +396,21 @@ export async function ensureCodexSkillsInjected(
   const skillsHome = options.skillsHome ?? resolveCodexSkillsDir(resolveSharedCodexHomeDir());
   await fs.mkdir(skillsHome, { recursive: true });
   const linkSkill = options.linkSkill;
+  const injectionMode = options.injectionMode ?? "symlink";
   for (const entry of skillsEntries) {
     const target = path.join(skillsHome, entry.runtimeName);
 
     try {
+      if (injectionMode === "copy") {
+        const result = await copyCodexSkillFallback(entry.source, target, { repairExisting: true });
+        if (result === "skipped") continue;
+        await onLog(
+          "stdout",
+          `[paperclip] ${result === "repaired" ? "Repaired" : "Copied"} Codex skill "${entry.runtimeName}" into ${skillsHome}\n`,
+        );
+        continue;
+      }
+
       const existing = await fs.lstat(target).catch(() => null);
       if (existing?.isSymbolicLink()) {
         const linkedPath = await fs.readlink(target).catch(() => null);
@@ -325,6 +444,20 @@ export async function ensureCodexSkillsInjected(
         `[paperclip] ${result === "repaired" ? "Repaired" : "Injected"} Codex skill "${entry.runtimeName}" into ${skillsHome}\n`,
       );
     } catch (err) {
+      if (!linkSkill && isFilesystemPermissionError(err)) {
+        try {
+          const result = await copyCodexSkillFallback(entry.source, target);
+          if (result !== "skipped") {
+            await onLog(
+              "stdout",
+              `[paperclip] ${result === "repaired" ? "Repaired" : "Copied"} Codex skill "${entry.runtimeName}" into ${skillsHome} because symlinks are unavailable\n`,
+            );
+            continue;
+          }
+        } catch {
+          // Fall through to the original diagnostic below.
+        }
+      }
       await onLog(
         "stderr",
         `[paperclip] Failed to inject Codex skill "${entry.key}" into ${skillsHome}: ${err instanceof Error ? err.message : String(err)}\n`,
@@ -385,6 +518,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     legacyRemoteExecution: ctx.executionTransport?.remoteExecution,
   });
   const executionTargetIsRemote = adapterExecutionTargetIsRemote(executionTarget);
+  const executionTargetIsSandbox =
+    executionTarget?.kind === "remote" && executionTarget.transport === "sandbox";
   const remoteGitSandboxConfig = parseObject(config.remoteGitSandbox);
   const providerRealizedRemoteGitWorkspace =
     executionTargetIsRemote && remoteGitSandboxConfig.enabled === true;
@@ -417,6 +552,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       skillsHome: codexSkillsDir,
       skillsEntries: codexSkillEntries,
       desiredSkillNames,
+      injectionMode: executionTargetIsSandbox ? "copy" : "symlink",
     },
   );
   const timeoutSec = resolveAdapterExecutionTargetTimeoutSec(
@@ -472,12 +608,15 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     effectiveExecutionCwd = preparedExecutionTargetRuntime.workspaceRemoteDir;
   }
   const runtimeExecutionTarget = overrideAdapterExecutionTargetRemoteCwd(executionTarget, effectiveExecutionCwd);
-  const executionTargetIsSandbox =
-    runtimeExecutionTarget?.kind === "remote" && runtimeExecutionTarget.transport === "sandbox";
   const restoreRemoteWorkspace = preparedExecutionTargetRuntime
     ? () => preparedExecutionTargetRuntime.restoreWorkspace()
     : null;
   let paperclipBridge: Awaited<ReturnType<typeof startAdapterExecutionTargetPaperclipBridge>> = null;
+  let codexProgressBuffer = "";
+  let latestCodexProgressMessage: string | null = null;
+  let lastEmittedCodexProgressMessage: string | null = null;
+  let bridgeAliveWithoutCodexOutputEmitted = false;
+  let syntheticProgressId = 0;
   const remoteCodexHome = executionTargetIsRemote
     ? preparedExecutionTargetRuntime?.assetDirs.home ??
       path.posix.join(effectiveExecutionCwd, ".paperclip-runtime", "codex", "home")
@@ -579,6 +718,30 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       timeoutSec,
       hostApiToken: env.PAPERCLIP_API_KEY,
       onLog,
+      onActivity: async (activity) => {
+        if (activity.source !== "sandbox_bridge" || activity.status !== "alive") return;
+        const progress = latestCodexProgressMessage
+          ? summarizeCodexProgressMessage(latestCodexProgressMessage)
+          : "";
+        if (!progress) {
+          if (bridgeAliveWithoutCodexOutputEmitted) return;
+          bridgeAliveWithoutCodexOutputEmitted = true;
+          syntheticProgressId += 1;
+          await onLog("stdout", buildCodexSyntheticProgressJsonl({
+            id: syntheticProgressId,
+            message: "Sandbox bridge alive; waiting for Codex output",
+          }));
+          return;
+        }
+        if (progress === lastEmittedCodexProgressMessage) return;
+        lastEmittedCodexProgressMessage = progress;
+        const message = `Still working: ${progress}`;
+        syntheticProgressId += 1;
+        await onLog("stdout", buildCodexSyntheticProgressJsonl({
+          id: syntheticProgressId,
+          message,
+        }));
+      },
     });
     if (paperclipBridge) {
       Object.assign(env, paperclipBridge.env);
@@ -801,6 +964,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       graceSec,
       onSpawn,
       onLog: async (stream, chunk) => {
+        if (stream === "stdout") {
+          const collected = collectCodexProgressMessages({ buffer: codexProgressBuffer, chunk });
+          codexProgressBuffer = collected.buffer;
+          for (const message of collected.messages) {
+            latestCodexProgressMessage = message;
+          }
+        }
         if (stream !== "stderr") {
           await onLog(stream, chunk);
           return;

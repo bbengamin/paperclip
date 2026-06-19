@@ -32,9 +32,9 @@ import {
 } from "./sandbox-provider-runtime.js";
 import { pluginRegistryService } from "./plugin-registry.js";
 import type { PluginWorkerManager } from "./plugin-worker-manager.js";
+import { logger } from "../middleware/logger.js";
 import {
   destroyPluginEnvironmentLease,
-  DEFAULT_ENVIRONMENT_EXECUTE_RPC_TIMEOUT_MS,
   executePluginEnvironmentCommand,
   realizePluginEnvironmentWorkspace,
   resolvePluginSandboxProviderDriverByKey,
@@ -43,6 +43,8 @@ import {
 } from "./plugin-environment-driver.js";
 import { collectSecretRefPaths } from "./json-schema-secret-refs.js";
 import { buildWorkspaceRealizationRecordFromDriverInput } from "./workspace-realization.js";
+
+const log = logger.child({ service: "environment-runtime" });
 
 export function buildEnvironmentLeaseContext(input: {
   persistedExecutionWorkspace: Pick<ExecutionWorkspace, "id" | "mode"> | null;
@@ -139,6 +141,31 @@ function resolvePluginSandboxRpcTimeoutMs(config: Record<string, unknown>): numb
   });
 }
 
+function environmentExecuteStreamChannel(providerLeaseId: string | null | undefined): string | null {
+  return providerLeaseId && providerLeaseId.trim().length > 0
+    ? `environment-execute:${providerLeaseId.trim()}`
+    : null;
+}
+
+function readExecuteStreamEvent(value: unknown): { stream: "stdout" | "stderr"; chunk: string } | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const stream = (value as { stream?: unknown }).stream;
+  const chunk = (value as { chunk?: unknown }).chunk;
+  if (stream !== "stdout" && stream !== "stderr") return null;
+  if (typeof chunk !== "string" || chunk.length === 0) return null;
+  return { stream, chunk };
+}
+
+function retainedSandboxLeaseMatchesIssueScope(input: {
+  lease: EnvironmentLease;
+  issueId: string | null;
+}): boolean {
+  if (input.lease.status !== "retained") return false;
+  if (input.lease.leasePolicy !== "retain_on_failure") return false;
+  if (!input.issueId || input.lease.issueId !== input.issueId) return false;
+  return true;
+}
+
 export interface EnvironmentDriverLeaseInput {
   environment: Environment;
   lease: EnvironmentLease;
@@ -160,6 +187,7 @@ export interface EnvironmentDriverExecuteInput extends EnvironmentDriverLeaseInp
   env?: Record<string, string>;
   stdin?: string;
   timeoutMs?: number;
+  onLog?: (stream: "stdout" | "stderr", chunk: string) => void | Promise<void>;
 }
 
 export interface EnvironmentRuntimeDriver {
@@ -446,13 +474,38 @@ function createSandboxEnvironmentDriver(
         // We also filter out leases whose policy is not reuse_by_environment
         // so any non-reusable lease (including ad-hoc test leases that
         // landed in the table from older code paths) cannot be matched.
-        const reusableExistingLeases = parsed.config.reuseLease && input.heartbeatRunId !== null
+        const reusableExistingLeases = input.heartbeatRunId !== null
           ? (await environmentsSvc.listLeases(input.environment.id))
-              .filter((lease) => lease.leasePolicy === "reuse_by_environment")
+              .filter((lease) =>
+                lease.leasePolicy === "reuse_by_environment" ||
+                retainedSandboxLeaseMatchesIssueScope({
+                  lease,
+                  issueId: input.issueId,
+                })
+              )
           : [];
-        const reusableProviderLeaseId = parsed.config.reuseLease && input.heartbeatRunId !== null
-          ? findReusableSandboxLeaseId({ config: storedConfig, leases: reusableExistingLeases })
-          : null;
+        const retainedLease = reusableExistingLeases.find((lease) =>
+          retainedSandboxLeaseMatchesIssueScope({
+            lease,
+            issueId: input.issueId,
+          }) &&
+          lease.executionWorkspaceId === input.executionWorkspaceId &&
+          lease.providerLeaseId
+        ) ?? reusableExistingLeases.find((lease) =>
+          retainedSandboxLeaseMatchesIssueScope({
+            lease,
+            issueId: input.issueId,
+          }) &&
+          lease.providerLeaseId
+        ) ?? null;
+        const retainedProviderLeaseId = retainedLease?.providerLeaseId ?? null;
+        const reusableProviderLeaseId = retainedProviderLeaseId ??
+          (parsed.config.reuseLease && input.heartbeatRunId !== null
+            ? findReusableSandboxLeaseId({
+                config: storedConfig,
+                leases: reusableExistingLeases.filter((lease) => lease.leasePolicy === "reuse_by_environment"),
+              })
+            : null);
         const reusableLease = reusableProviderLeaseId
           ? reusableExistingLeases.find((lease) => lease.providerLeaseId === reusableProviderLeaseId)
           : null;
@@ -477,6 +530,12 @@ function createSandboxEnvironmentDriver(
                 : null,
             ).catch(() => null)
           : null;
+        if (retainedLease && reusableLease?.id === retainedLease.id && !providerLease) {
+          await environmentsSvc.releaseLease(retainedLease.id, "expired", {
+            failureReason: "retained_provider_lease_unavailable",
+            cleanupStatus: "failed",
+          });
+        }
         const acquiredLease = providerLease ?? await pluginWorkerManager.call(
           pluginProvider.resolved.plugin.id,
           "environmentAcquireLease",
@@ -500,7 +559,9 @@ function createSandboxEnvironmentDriver(
         // the test's provider lease and lose its sandbox when the test ends.
         const resolvedLeasePolicy = parsed.config.reuseLease && input.heartbeatRunId !== null
           ? "reuse_by_environment"
-          : "ephemeral";
+          : input.heartbeatRunId !== null && input.issueId
+            ? "retain_on_failure"
+            : "ephemeral";
 
         return await environmentsSvc.acquireLease({
           companyId: input.companyId,
@@ -601,19 +662,23 @@ function createSandboxEnvironmentDriver(
         throw new Error(`Expected sandbox environment config for lease "${input.lease.id}".`);
       }
 
-      let cleanupStatus: "success" | "failed" = "success";
-      try {
-        await releaseSandboxProviderLease({
-          config: parsed.config,
-          providerLeaseId: input.lease.providerLeaseId,
-          status: input.status,
-        });
-      } catch {
-        cleanupStatus = "failed";
-      }
       const releaseStatus = input.lease.leasePolicy === "retain_on_failure" && input.status === "failed"
         ? "retained" as const
         : input.status;
+      let cleanupStatus: "pending" | "success" | "failed" = "success";
+      if (releaseStatus === "retained") {
+        cleanupStatus = "pending";
+      } else {
+        try {
+          await releaseSandboxProviderLease({
+            config: parsed.config,
+            providerLeaseId: input.lease.providerLeaseId,
+            status: input.status,
+          });
+        } catch {
+          cleanupStatus = "failed";
+        }
+      }
       return await environmentsSvc.releaseLease(input.lease.id, releaseStatus, {
         failureReason: input.status === "failed" ? "adapter_or_run_failure" : undefined,
         cleanupStatus,
@@ -680,7 +745,38 @@ function createSandboxEnvironmentDriver(
             provider: providerKey,
           });
           const sanitizedConfig = stripSandboxProviderEnvelope(config as SandboxEnvironmentConfig);
-          return await pluginWorkerManager.call(pluginId, "environmentExecute", {
+          const streamChannel = input.onLog
+            ? environmentExecuteStreamChannel(input.lease.providerLeaseId)
+            : null;
+          const unsubscribe = streamChannel && pluginWorkerManager.subscribeStream
+            ? pluginWorkerManager.subscribeStream(
+                pluginId,
+                streamChannel,
+                input.lease.companyId,
+                (event, eventType) => {
+                  if (eventType !== "message") return;
+                  const parsed = readExecuteStreamEvent(event);
+                  if (!parsed) return;
+                  log.info(
+                    {
+                      pluginId,
+                      providerKey,
+                      environmentId: input.environment.id,
+                      leaseId: input.lease.id,
+                      providerLeaseId: input.lease.providerLeaseId,
+                      companyId: input.lease.companyId,
+                      streamChannel,
+                      stream: parsed.stream,
+                      chunkBytes: Buffer.byteLength(parsed.chunk, "utf8"),
+                    },
+                    "forwarding plugin environment stream chunk to adapter log",
+                  );
+                  void input.onLog?.(parsed.stream, parsed.chunk);
+                },
+              )
+            : null;
+          try {
+            return await pluginWorkerManager.call(pluginId, "environmentExecute", {
             driverKey: providerKey,
             companyId: input.lease.companyId,
             environmentId: input.environment.id,
@@ -698,10 +794,12 @@ function createSandboxEnvironmentDriver(
             stdin: input.stdin,
             timeoutMs: input.timeoutMs,
           }, resolvePluginExecuteRpcTimeoutMs({
-            requestedTimeoutMs: input.timeoutMs,
-            config: sanitizedConfig,
-            minimumTimeoutMs: DEFAULT_ENVIRONMENT_EXECUTE_RPC_TIMEOUT_MS,
-          }));
+              requestedTimeoutMs: input.timeoutMs,
+              config: sanitizedConfig,
+            }));
+          } finally {
+            unsubscribe?.();
+          }
         }
       }
       throw new Error("Sandbox driver does not support direct command execution for built-in providers.");
@@ -715,8 +813,14 @@ function createSandboxEnvironmentDriver(
     const pluginId = readString(metadata.pluginId);
     const providerKey = readString(metadata.provider);
 
-    let cleanupStatus: "success" | "failed" = "success";
-    if (pluginId && providerKey && pluginWorkerManager?.isRunning(pluginId)) {
+    const releaseStatus =
+      input.lease.leasePolicy === "retain_on_failure" && input.status === "failed"
+        ? ("retained" as const)
+        : input.status;
+    let cleanupStatus: "pending" | "success" | "failed" = "success";
+    if (releaseStatus === "retained") {
+      cleanupStatus = "pending";
+    } else if (pluginId && providerKey && pluginWorkerManager?.isRunning(pluginId)) {
       try {
         const config = await resolvePluginSandboxRuntimeConfig({
           environment: input.environment,
@@ -739,10 +843,6 @@ function createSandboxEnvironmentDriver(
       cleanupStatus = "failed";
     }
 
-    const releaseStatus =
-      input.lease.leasePolicy === "retain_on_failure" && input.status === "failed"
-        ? ("retained" as const)
-        : input.status;
     return await environmentsSvc.releaseLease(input.lease.id, releaseStatus, {
       failureReason: input.status === "failed" ? "adapter_or_run_failure" : undefined,
       cleanupStatus,

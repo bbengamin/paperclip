@@ -87,6 +87,7 @@ export async function resolveEnvironmentExecutionTarget(input: {
                 env: commandInput.env,
                 stdin: commandInput.stdin,
                 timeoutMs: commandInput.timeoutMs,
+                onLog: commandInput.onLog,
               });
               if (result.stdout) await commandInput.onLog?.("stdout", result.stdout);
               if (result.stderr) await commandInput.onLog?.("stderr", result.stderr);

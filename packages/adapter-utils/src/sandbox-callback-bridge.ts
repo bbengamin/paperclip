@@ -958,15 +958,50 @@ export async function startSandboxCallbackBridgeServer(input: {
     alivePingIntervalMs: input.alivePingIntervalMs,
   });
   const nodeCommand = input.nodeCommand?.trim() || "node";
+  const envEntries = Object.entries(env).filter(([key]) => key !== "PAPERCLIP_BRIDGE_PORT");
   const startResult = await input.runner.execute({
     command: shellCommand,
     args: shellCommandArgs(
       [
+        "set -eu",
         `mkdir -p ${shellQuote(directories.requestsDir)} ${shellQuote(directories.responsesDir)} ${shellQuote(directories.logsDir)}`,
         `rm -f ${shellQuote(directories.readyFile)} ${shellQuote(directories.pidFile)}`,
-        `nohup env ${Object.entries(env).map(([key, value]) => `${key}=${shellQuote(value)}`).join(" ")} ` +
+        `bridge_port=${shellQuote(env.PAPERCLIP_BRIDGE_PORT)}`,
+        `if [ "$bridge_port" = "0" ]; then`,
+        `  bridge_port="$(${shellQuote(nodeCommand)} -e ${shellQuote([
+          "const net=require('node:net');",
+          `const host=${JSON.stringify(env.PAPERCLIP_BRIDGE_HOST)};`,
+          "const server=net.createServer();",
+          "server.listen(0, host, () => {",
+          "  const address=server.address();",
+          "  if (!address || typeof address === 'string') process.exit(1);",
+          "  console.log(address.port);",
+          "  server.close();",
+          "});",
+          "server.on('error', () => process.exit(1));",
+        ].join(""))})"`,
+        "fi",
+        "(",
+        "  child=\"\"",
+        "  stop_bridge() {",
+        "    if [ -n \"$child\" ]; then",
+        "      kill \"$child\" 2>/dev/null || true",
+        "      wait \"$child\" 2>/dev/null || true",
+        "    fi",
+        "    exit 0",
+        "  }",
+        "  trap stop_bridge INT TERM",
+        "  while :; do",
+        `    env ${envEntries.map(([key, value]) => `${key}=${shellQuote(value)}`).join(" ")} PAPERCLIP_BRIDGE_PORT="$bridge_port" ` +
           `${shellQuote(nodeCommand)} ${shellQuote(remoteEntrypoint)} ` +
           `>> ${shellQuote(directories.logFile)} 2>&1 < /dev/null &`,
+        "    child=$!",
+        "    wait \"$child\" || true",
+        "    child=\"\"",
+        `    printf '%s\\n' "[paperclip] sandbox callback bridge process exited; restarting." >> ${shellQuote(directories.logFile)}`,
+        "    sleep 1",
+        "  done",
+        ") &",
         "pid=$!",
         `printf '%s\\n' \"$pid\" > ${shellQuote(directories.pidFile)}`,
         "printf '{\"pid\":%s}\\n' \"$pid\"",

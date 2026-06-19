@@ -23,6 +23,7 @@ interface BridgeClientOptions {
 
 interface BridgeExecuteOptions {
   onOutput?: (stream: "stdout" | "stderr", chunk: string) => void | Promise<void>;
+  onActivity?: () => void | Promise<void>;
 }
 
 interface BridgeErrorBody {
@@ -234,6 +235,9 @@ async function consumeExecuteEventStream(
 
   while (true) {
     const { done, value } = await reader.read();
+    if (!done) {
+      await options.onActivity?.();
+    }
     buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
     const parsed = parseSseChunk(done && buffer.length > 0 ? `${buffer}\n\n` : buffer);
     buffer = parsed.rest;

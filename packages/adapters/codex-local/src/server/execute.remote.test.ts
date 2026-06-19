@@ -206,6 +206,206 @@ describe("codex remote execution", () => {
     }));
   });
 
+  it("mirrors sandbox alive pings into Codex-compatible progress transcript lines", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-remote-progress-"));
+    cleanupDirs.push(rootDir);
+    const workspaceDir = path.join(rootDir, "workspace");
+    const codexHomeDir = path.join(rootDir, "codex-home");
+    await mkdir(workspaceDir, { recursive: true });
+    await mkdir(codexHomeDir, { recursive: true });
+    await writeFile(path.join(codexHomeDir, "auth.json"), "{}", "utf8");
+
+    (runChildProcess as unknown as {
+      mockImplementationOnce: (fn: (...args: unknown[]) => Promise<{
+        exitCode: number;
+        signal: string | null;
+        timedOut: boolean;
+        stdout: string;
+        stderr: string;
+        pid: number | null;
+        startedAt: string;
+      }>) => void;
+    }).mockImplementationOnce(async (...args: unknown[]) => {
+      const options = args[3] as {
+        onLog?: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
+      };
+      await options.onLog?.(
+        "stdout",
+        `${JSON.stringify({
+          type: "item.completed",
+          item: {
+            id: "item_1",
+            type: "agent_message",
+            text: "Creating GitHub PR",
+          },
+        })}\n`,
+      );
+      return {
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        stdout: `${JSON.stringify({
+          type: "item.completed",
+          item: {
+            id: "item_1",
+            type: "agent_message",
+            text: "Creating GitHub PR",
+          },
+        })}\n`,
+        stderr: "",
+        pid: 123,
+        startedAt: new Date().toISOString(),
+      };
+    });
+
+    const chunks: Array<{ stream: "stdout" | "stderr"; chunk: string }> = [];
+    await execute({
+      runId: "run-progress",
+      agent: {
+        id: "agent-1",
+        companyId: "company-1",
+        name: "CodexCoder",
+        adapterType: "codex_local",
+        adapterConfig: {},
+      },
+      runtime: {
+        sessionId: null,
+        sessionParams: null,
+        sessionDisplayId: null,
+        taskKey: null,
+      },
+      config: {
+        command: "codex",
+        env: {
+          CODEX_HOME: codexHomeDir,
+        },
+      },
+      context: {
+        paperclipWorkspace: {
+          cwd: workspaceDir,
+          source: "project_primary",
+        },
+      },
+      executionTransport: {
+        remoteExecution: {
+          host: "127.0.0.1",
+          port: 2222,
+          username: "fixture",
+          remoteWorkspacePath: "/remote/workspace",
+          remoteCwd: "/remote/workspace",
+          privateKey: "PRIVATE KEY",
+          knownHosts: "[127.0.0.1]:2222 ssh-ed25519 AAAA",
+          strictHostKeyChecking: true,
+        },
+      },
+      onLog: async (stream, chunk) => {
+        chunks.push({ stream, chunk });
+      },
+    });
+
+    const bridgeCalls = (startAdapterExecutionTargetPaperclipBridge as unknown as {
+      mock: { calls: Array<[unknown]> };
+    }).mock.calls;
+    const bridgeOptions = bridgeCalls[0]?.[0] as
+      | { onActivity?: (activity: { source: string | null; status: string | null }) => Promise<void> }
+      | undefined;
+    expect(bridgeOptions?.onActivity).toEqual(expect.any(Function));
+
+    await bridgeOptions?.onActivity?.({
+      source: "sandbox_bridge",
+      status: "alive",
+    });
+    await bridgeOptions?.onActivity?.({
+      source: "sandbox_bridge",
+      status: "alive",
+    });
+
+    const progressChunks = chunks.filter((entry) =>
+      entry.stream === "stdout" &&
+      entry.chunk.includes("Still working: Creating GitHub PR")
+    );
+    expect(progressChunks).toHaveLength(1);
+    expect(progressChunks[0]?.chunk).toContain('"type":"agent_message"');
+  });
+
+  it("emits one bridge-alive progress line while waiting for first Codex output", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-remote-waiting-"));
+    cleanupDirs.push(rootDir);
+    const workspaceDir = path.join(rootDir, "workspace");
+    const codexHomeDir = path.join(rootDir, "codex-home");
+    await mkdir(workspaceDir, { recursive: true });
+    await mkdir(codexHomeDir, { recursive: true });
+    await writeFile(path.join(codexHomeDir, "auth.json"), "{}", "utf8");
+
+    const chunks: Array<{ stream: "stdout" | "stderr"; chunk: string }> = [];
+    await execute({
+      runId: "run-waiting",
+      agent: {
+        id: "agent-1",
+        companyId: "company-1",
+        name: "CodexCoder",
+        adapterType: "codex_local",
+        adapterConfig: {},
+      },
+      runtime: {
+        sessionId: null,
+        sessionParams: null,
+        sessionDisplayId: null,
+        taskKey: null,
+      },
+      config: {
+        command: "codex",
+        env: {
+          CODEX_HOME: codexHomeDir,
+        },
+      },
+      context: {
+        paperclipWorkspace: {
+          cwd: workspaceDir,
+          source: "project_primary",
+        },
+      },
+      executionTransport: {
+        remoteExecution: {
+          host: "127.0.0.1",
+          port: 2222,
+          username: "fixture",
+          remoteWorkspacePath: "/remote/workspace",
+          remoteCwd: "/remote/workspace",
+          privateKey: "PRIVATE KEY",
+          knownHosts: "[127.0.0.1]:2222 ssh-ed25519 AAAA",
+          strictHostKeyChecking: true,
+        },
+      },
+      onLog: async (stream, chunk) => {
+        chunks.push({ stream, chunk });
+      },
+    });
+
+    const bridgeCalls = (startAdapterExecutionTargetPaperclipBridge as unknown as {
+      mock: { calls: Array<[unknown]> };
+    }).mock.calls;
+    const bridgeOptions = bridgeCalls[0]?.[0] as
+      | { onActivity?: (activity: { source: string | null; status: string | null }) => Promise<void> }
+      | undefined;
+
+    await bridgeOptions?.onActivity?.({
+      source: "sandbox_bridge",
+      status: "alive",
+    });
+    await bridgeOptions?.onActivity?.({
+      source: "sandbox_bridge",
+      status: "alive",
+    });
+
+    const waitingChunks = chunks.filter((entry) =>
+      entry.stream === "stdout" &&
+      entry.chunk.includes("Sandbox bridge alive; waiting for Codex output")
+    );
+    expect(waitingChunks).toHaveLength(1);
+    expect(waitingChunks[0]?.chunk).toContain('"type":"agent_message"');
+  });
+
   it("does not resume saved Codex sessions for remote SSH execution without a matching remote identity", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-remote-resume-"));
     cleanupDirs.push(rootDir);

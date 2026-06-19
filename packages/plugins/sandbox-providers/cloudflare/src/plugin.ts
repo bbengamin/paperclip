@@ -14,6 +14,7 @@ import type {
   PluginEnvironmentResumeLeaseParams,
   PluginEnvironmentValidateConfigParams,
   PluginEnvironmentValidationResult,
+  PluginStreamsClient,
 } from "@paperclipai/plugin-sdk";
 import { CloudflareBridgeError, createCloudflareBridgeClient } from "./bridge-client.js";
 import {
@@ -133,10 +134,12 @@ function logCloudflareExecChunk(
 }
 
 let pluginLogger: PluginLogger | null = null;
+let pluginStreams: PluginStreamsClient | null = null;
 
 const plugin = definePlugin({
   async setup(ctx) {
     pluginLogger = ctx.logger;
+    pluginStreams = ctx.streams;
     ctx.logger.info("Cloudflare sandbox provider plugin ready");
   },
 
@@ -329,28 +332,48 @@ const plugin = definePlugin({
       // writes (e.g. `cat ready.json && exit 0`), so we never stream for
       // bridge control traffic — only adapter sessions get live log forwarding.
       const isBridgeChannel = params.env?.[SANDBOX_EXEC_CHANNEL_ENV] === SANDBOX_EXEC_CHANNEL_BRIDGE;
-      const streamingOptions = pluginLogger && !isBridgeChannel
+      const streamChannel = !isBridgeChannel && params.lease.providerLeaseId
+        ? `environment-execute:${params.lease.providerLeaseId}`
+        : null;
+      if (streamChannel) {
+        pluginStreams?.open(streamChannel, params.companyId);
+      }
+      const streamingOptions = !isBridgeChannel && (pluginLogger || pluginStreams)
         ? {
             onOutput: async (stream: "stdout" | "stderr", chunk: string) => {
               logCloudflareExecChunk(pluginLogger, stream, chunk);
+              if (streamChannel) {
+                pluginStreams?.emit(streamChannel, { stream, chunk });
+              }
+            },
+            onActivity: async () => {
+              if (streamChannel) {
+                pluginStreams?.emit(streamChannel, { type: "activity" });
+              }
             },
           }
         : undefined;
-      return await client.execute(
-        {
-          providerLeaseId: params.lease.providerLeaseId,
-          command: params.command,
-          args: params.args,
-          cwd: params.cwd,
-          env: sanitizeExecuteEnv(params.env),
-          stdin: params.stdin ?? null,
-          timeoutMs: params.timeoutMs ?? config.timeoutMs,
-          sessionStrategy: session.sessionStrategy,
-          sessionId: session.sessionId,
-        },
-        { environmentId: params.environmentId, issueId: params.issueId },
-        streamingOptions,
-      );
+      try {
+        return await client.execute(
+          {
+            providerLeaseId: params.lease.providerLeaseId,
+            command: params.command,
+            args: params.args,
+            cwd: params.cwd,
+            env: sanitizeExecuteEnv(params.env),
+            stdin: params.stdin ?? null,
+            timeoutMs: params.timeoutMs ?? config.timeoutMs,
+            sessionStrategy: session.sessionStrategy,
+            sessionId: session.sessionId,
+          },
+          { environmentId: params.environmentId, issueId: params.issueId },
+          streamingOptions,
+        );
+      } finally {
+        if (streamChannel) {
+          pluginStreams?.close(streamChannel);
+        }
+      }
     } catch (error) {
       if (error instanceof CloudflareBridgeError && isLostLeaseError(error)) {
         return lostLeaseExecuteResult(error);

@@ -97,6 +97,15 @@ export interface AdapterExecutionTargetPaperclipBridgeHandle {
   stop(): Promise<void>;
 }
 
+export interface AdapterExecutionTargetPaperclipBridgeActivity {
+  runId: string;
+  source: string | null;
+  status: string | null;
+  message: string | null;
+  at: string | null;
+  payload: Record<string, unknown>;
+}
+
 export { sanitizeRemoteExecutionEnv } from "./remote-execution-env.js";
 
 export const DEFAULT_REMOTE_SANDBOX_ADAPTER_TIMEOUT_SEC = 300;
@@ -1021,6 +1030,38 @@ function bridgeResponseBodyLimitError(maxBodyBytes: number): Error {
   return new Error(`Bridge response body exceeded the configured size limit of ${maxBodyBytes} bytes.`);
 }
 
+function readBridgeActivityPayload(input: {
+  runId: string;
+  request: { method: string; path: string; body: string };
+}): AdapterExecutionTargetPaperclipBridgeActivity | null {
+  if (input.request.method.trim().toUpperCase() !== "POST") return null;
+  const activityPath = new RegExp(`^/api/heartbeat-runs/${input.runId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/activity$`);
+  if (!activityPath.test(input.request.path)) return null;
+
+  let parsed: Record<string, unknown> = {};
+  try {
+    const value = JSON.parse(input.request.body || "{}");
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      parsed = value as Record<string, unknown>;
+    }
+  } catch {
+    parsed = {};
+  }
+
+  const read = (key: string) => {
+    const value = parsed[key];
+    return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+  };
+  return {
+    runId: input.runId,
+    source: read("source"),
+    status: read("status"),
+    message: read("message"),
+    at: read("at"),
+    payload: parsed,
+  };
+}
+
 async function readBridgeForwardResponseBody(response: Response, maxBodyBytes: number): Promise<string> {
   const rawContentLength = response.headers.get("content-length");
   if (rawContentLength) {
@@ -1060,6 +1101,7 @@ export async function startAdapterExecutionTargetPaperclipBridge(input: {
   hostApiToken: string | null | undefined;
   hostApiUrl?: string | null;
   onLog?: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
+  onActivity?: (activity: AdapterExecutionTargetPaperclipBridgeActivity) => Promise<void>;
   maxBodyBytes?: number | null;
 }): Promise<AdapterExecutionTargetPaperclipBridgeHandle | null> {
   if (!adapterExecutionTargetUsesPaperclipBridge(input.target)) {
@@ -1159,10 +1201,22 @@ export async function startAdapterExecutionTargetPaperclipBridge(input: {
             `[paperclip] Bridge proxy response ${response.status} for ${method} ${request.path}${request.query ? `?${request.query}` : ""}\n`,
           );
         }
+        const responseBody = await readBridgeForwardResponseBody(response, maxBodyBytes);
+        const activity = response.ok
+          ? readBridgeActivityPayload({ runId: input.runId, request: { method, path: request.path, body: request.body } })
+          : null;
+        if (activity) {
+          await input.onActivity?.(activity).catch((error) => {
+            void onLog(
+              "stderr",
+              `[paperclip] Bridge activity callback failed: ${error instanceof Error ? error.message : String(error)}\n`,
+            );
+          });
+        }
         return {
           status: response.status,
           headers: buildBridgeResponseHeaders(response),
-          body: await readBridgeForwardResponseBody(response, maxBodyBytes),
+          body: responseBody,
         };
       },
     });

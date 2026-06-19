@@ -13,7 +13,6 @@ import { startWorkerRpcHost } from "../../../packages/plugins/sdk/src/worker-rpc
 import { pluginManifestV1Schema, type PaperclipPluginManifestV1 } from "@paperclipai/shared";
 import { pluginCapabilityValidator } from "../services/plugin-capability-validator.js";
 import {
-  DEFAULT_ENVIRONMENT_EXECUTE_RPC_TIMEOUT_MS,
   resolvePluginExecuteRpcTimeoutMs,
 } from "../services/plugin-environment-driver.js";
 
@@ -90,12 +89,11 @@ describe("plugin environment driver seam", () => {
     });
   });
 
-  it("keeps environmentExecute RPC timeout above the command timeout wrapper", () => {
+  it("keeps environmentExecute RPC timeout close to the command timeout wrapper", () => {
     expect(resolvePluginExecuteRpcTimeoutMs({
       requestedTimeoutMs: 300_000,
       config: {},
-      minimumTimeoutMs: DEFAULT_ENVIRONMENT_EXECUTE_RPC_TIMEOUT_MS,
-    })).toBe(900_000);
+    })).toBe(330_000);
 
     expect(resolvePluginExecuteRpcTimeoutMs({
       requestedTimeoutMs: 1_234,

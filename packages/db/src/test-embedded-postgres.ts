@@ -103,7 +103,25 @@ async function createEmbeddedPostgresTestInstance(tempDirPrefix: string) {
 }
 
 function cleanupEmbeddedPostgresTestDirs(dataDir: string) {
-  fs.rmSync(dataDir, { recursive: true, force: true });
+  try {
+    fs.rmSync(dataDir, {
+      recursive: true,
+      force: true,
+      maxRetries: process.platform === "win32" ? 10 : 0,
+      retryDelay: 100,
+    });
+  } catch (error) {
+    if (process.platform === "win32" && isTransientWindowsCleanupError(error)) {
+      return;
+    }
+    throw error;
+  }
+}
+
+function isTransientWindowsCleanupError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const code = (error as { code?: unknown }).code;
+  return code === "EBUSY" || code === "EPERM" || code === "ENOTEMPTY";
 }
 
 function formatEmbeddedPostgresError(error: unknown): string {

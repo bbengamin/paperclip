@@ -202,6 +202,12 @@ interface PendingRequest {
   resolve: (response: JsonRpcResponse) => void;
   /** Timeout timer handle. */
   timer: ReturnType<typeof setTimeout>;
+  /** Timeout duration for this request. */
+  timeoutMs: number;
+  /** Re-armable timeout callback. */
+  onTimeout: () => void;
+  /** Progress stream channel that keeps this request alive. */
+  progressStreamChannel?: string;
   /** Timestamp when the request was sent. */
   sentAt: number;
   /** Active host-owned invocation id attached to this host→worker call. */
@@ -357,6 +363,13 @@ export interface PluginWorkerManager {
     params: HostToWorkerMethods[M][0],
     timeoutMs?: number,
   ): Promise<HostToWorkerMethods[M][1]>;
+
+  subscribeStream?(
+    pluginId: string,
+    channel: string,
+    companyId: string,
+    listener: (event: unknown, eventType: "message" | "open" | "close" | "error") => void,
+  ): () => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -502,6 +515,24 @@ export function createPluginWorkerHandle(
 
   function isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+
+  function environmentExecuteProgressStreamChannel(params: unknown): string | null {
+    if (!isRecord(params) || !isRecord(params.lease)) return null;
+    const providerLeaseId = readNonEmptyString(params.lease.providerLeaseId);
+    return providerLeaseId ? `environment-execute:${providerLeaseId}` : null;
+  }
+
+  function refreshEnvironmentExecuteTimeout(channel: string): number {
+    let refreshed = 0;
+    for (const pending of pendingRequests.values()) {
+      if (pending.method !== "environmentExecute") continue;
+      if (pending.progressStreamChannel !== channel) continue;
+      clearTimeout(pending.timer);
+      pending.timer = setTimeout(pending.onTimeout, pending.timeoutMs);
+      refreshed += 1;
+    }
+    return refreshed;
   }
 
   function deriveInvocationScope(
@@ -666,6 +697,34 @@ export function createPluginWorkerHandle(
     ) {
       const params = (notification.params ?? {}) as Record<string, unknown>;
       const companyId = String(params.companyId ?? "");
+      const channel = String(params.channel ?? "");
+      let refreshedRpcTimeouts = 0;
+      if (
+        channel &&
+        (notification.method === "streams.open" || notification.method === "streams.emit")
+      ) {
+        // Keep the in-flight environmentExecute RPC alive based on the
+        // provider lease stream itself. Scope checks below decide whether the
+        // stream is publishable to subscribers, but they must not cause an
+        // actively-producing sandbox command to hit the RPC timeout.
+        refreshedRpcTimeouts = refreshEnvironmentExecuteTimeout(channel);
+      }
+      if (channel) {
+        const event = isRecord(params.event) ? params.event : null;
+        const stream = typeof event?.stream === "string" ? event.stream : null;
+        const chunk = typeof event?.chunk === "string" ? event.chunk : null;
+        log.info(
+          {
+            method: notification.method,
+            channel,
+            companyId,
+            stream,
+            chunkBytes: chunk ? Buffer.byteLength(chunk, "utf8") : undefined,
+            refreshedRpcTimeouts,
+          },
+          "plugin stream notification received",
+        );
+      }
       const context = contextForWorkerMessage(notification);
       if (context.invalidInvocationScope) {
         log.warn(
@@ -685,10 +744,9 @@ export function createPluginWorkerHandle(
 
       // Track open channels so we can emit synthetic close on crash
       if (notification.method === "streams.open") {
-        const ch = String(params.channel ?? "");
-        if (ch) openStreamChannels.set(ch, companyId);
+        if (channel) openStreamChannels.set(channel, companyId);
       } else if (notification.method === "streams.close") {
-        openStreamChannels.delete(String(params.channel ?? ""));
+        openStreamChannels.delete(channel);
       }
 
       if (options.onStreamNotification) {
@@ -1148,6 +1206,7 @@ export function createPluginWorkerHandle(
       // may still be running. Without this guard the timer's reject fires on
       // an already-settled promise, producing an unhandled rejection.
       let settled = false;
+      let timer: ReturnType<typeof setTimeout>;
 
       const settle = <T>(fn: (value: T) => void, value: T): void => {
         if (settled) return;
@@ -1158,7 +1217,7 @@ export function createPluginWorkerHandle(
         fn(value);
       };
 
-      const timer = setTimeout(() => {
+      const onTimeout = () => {
         settle(
           reject,
           new JsonRpcCallError({
@@ -1166,7 +1225,8 @@ export function createPluginWorkerHandle(
             message: `RPC call "${method}" timed out after ${timeout}ms`,
           }),
         );
-      }, timeout);
+      };
+      timer = setTimeout(onTimeout, timeout);
 
       const pending: PendingRequest = {
         id,
@@ -1181,6 +1241,11 @@ export function createPluginWorkerHandle(
           }
         },
         timer,
+        timeoutMs: timeout,
+        onTimeout,
+        progressStreamChannel: method === "environmentExecute"
+          ? environmentExecuteProgressStreamChannel(params) ?? undefined
+          : undefined,
         sentAt: Date.now(),
         invocationId: invocation?.id,
       };
@@ -1334,6 +1399,10 @@ export interface PluginWorkerManagerOptions {
   }) => void;
 }
 
+function pluginStreamKey(pluginId: string, channel: string, companyId: string): string {
+  return `${pluginId}:${channel}:${companyId}`;
+}
+
 /**
  * Create a new PluginWorkerManager.
  *
@@ -1365,8 +1434,35 @@ export function createPluginWorkerManager(
 ): PluginWorkerManager {
   const log = logger.child({ service: "plugin-worker-manager" });
   const workers = new Map<string, PluginWorkerHandle>();
+  const streamSubscribers = new Map<string, Set<(event: unknown, eventType: "message" | "open" | "close" | "error") => void>>();
   /** Per-plugin startup locks to prevent concurrent spawn races. */
   const startupLocks = new Map<string, Promise<PluginWorkerHandle>>();
+  const publishStreamNotification = (pluginId: string, method: string, params: Record<string, unknown>) => {
+    const channel = typeof params.channel === "string" ? params.channel : "";
+    const companyId = typeof params.companyId === "string" ? params.companyId : "";
+    if (!channel || !companyId) return;
+    const eventType =
+      method === "streams.open" ? "open" :
+      method === "streams.close" ? "close" :
+      "message";
+    const key = pluginStreamKey(pluginId, channel, companyId);
+    const subscribers = streamSubscribers.get(key);
+    if (!subscribers) {
+      log.info(
+        { pluginId, channel, companyId, method, subscriberCount: 0 },
+        "plugin stream notification has no subscribers",
+      );
+      return;
+    }
+    const event = method === "streams.emit" ? params.event : null;
+    log.info(
+      { pluginId, channel, companyId, method, subscriberCount: subscribers.size },
+      "publishing plugin stream notification to subscribers",
+    );
+    for (const listener of subscribers) {
+      listener(event, eventType);
+    }
+  };
 
   return {
     async startWorker(
@@ -1387,7 +1483,13 @@ export function createPluginWorkerManager(
         );
       }
 
-      const handle = createPluginWorkerHandle(pluginId, options);
+      const handle = createPluginWorkerHandle(pluginId, {
+        ...options,
+        onStreamNotification: (method, params) => {
+          options.onStreamNotification?.(method, params);
+          publishStreamNotification(pluginId, method, params);
+        },
+      });
       workers.set(pluginId, handle);
 
       // Subscribe to crash/ready events for live event forwarding
@@ -1482,6 +1584,32 @@ export function createPluginWorkerManager(
         );
       }
       return handle.call(method, params, timeoutMs);
+    },
+
+    subscribeStream(pluginId, channel, companyId, listener) {
+      const key = pluginStreamKey(pluginId, channel, companyId);
+      let subscribers = streamSubscribers.get(key);
+      if (!subscribers) {
+        subscribers = new Set();
+        streamSubscribers.set(key, subscribers);
+      }
+      subscribers.add(listener);
+      log.info(
+        { pluginId, channel, companyId, subscriberCount: subscribers.size },
+        "subscribed to plugin stream",
+      );
+      return () => {
+        const current = streamSubscribers.get(key);
+        if (!current) return;
+        current.delete(listener);
+        log.info(
+          { pluginId, channel, companyId, subscriberCount: current.size },
+          "unsubscribed from plugin stream",
+        );
+        if (current.size === 0) {
+          streamSubscribers.delete(key);
+        }
+      };
     },
   };
 }
