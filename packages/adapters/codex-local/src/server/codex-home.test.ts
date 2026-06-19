@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { prepareManagedCodexHome, sanitizeRemoteCodexConfigToml } from "./codex-home.js";
+import { pathExists, prepareManagedCodexHome, prepareRemoteCodexHomeAsset, sanitizeRemoteCodexConfigToml } from "./codex-home.js";
 
 describe("sanitizeRemoteCodexConfigToml", () => {
   it("keeps only allowlisted top-level keys and model_providers sections", () => {
@@ -72,6 +72,36 @@ describe("sanitizeRemoteCodexConfigToml", () => {
 
     expect(out).toContain("supports_websockets = true");
     expect(out).not.toContain("supports_websockets = false");
+  });
+});
+
+describe("prepareRemoteCodexHomeAsset", () => {
+  it("omits auth.json so sandbox runs use config.toml provider credentials", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-remote-home-"));
+    const sourceHome = path.join(root, "source");
+    await fs.mkdir(sourceHome, { recursive: true });
+    await fs.writeFile(
+      path.join(sourceHome, "config.toml"),
+      [
+        'model_provider = "cliproxyapi"',
+        "[model_providers.cliproxyapi]",
+        'base_url = "http://proxy/v1"',
+        "requires_openai_auth = false",
+      ].join("\n"),
+      "utf8",
+    );
+    await fs.writeFile(path.join(sourceHome, "auth.json"), '{"auth_mode":"chatgpt"}\n', "utf8");
+
+    const asset = await prepareRemoteCodexHomeAsset(sourceHome);
+    try {
+      await expect(pathExists(path.join(asset.dir, "auth.json"))).resolves.toBe(false);
+      await expect(fs.readFile(path.join(asset.dir, "config.toml"), "utf8")).resolves.toContain(
+        "[model_providers.cliproxyapi]",
+      );
+    } finally {
+      await asset.cleanup();
+      await fs.rm(root, { recursive: true, force: true });
+    }
   });
 });
 

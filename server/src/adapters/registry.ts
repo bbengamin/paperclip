@@ -142,6 +142,7 @@ import { buildExternalAdapters } from "./plugin-loader.js";
 import { getDisabledAdapterTypes } from "../services/adapter-plugin-store.js";
 import { processAdapter } from "./process/index.js";
 import { httpAdapter } from "./http/index.js";
+import { createWrappedCodexLocalAdapter } from "./wrappers/codex-local.js";
 import { createCodexRemoteAdapter } from "./wrappers/codex-remote.js";
 
 function readConfiguredCommand(config: Record<string, unknown>, fallback: string): string {
@@ -289,7 +290,7 @@ const acpxLocalAdapter: ServerAdapterModule = {
   getConfigSchema: getAcpxConfigSchema,
 };
 
-const codexLocalAdapter: ServerAdapterModule = {
+const nativeCodexLocalAdapter: ServerAdapterModule = {
   type: "codex_local",
   execute: codexExecute,
   testEnvironment: codexTestEnvironment,
@@ -309,6 +310,8 @@ const codexLocalAdapter: ServerAdapterModule = {
   agentConfigurationDoc: codexAgentConfigurationDoc,
   getQuotaWindows: codexGetQuotaWindows,
 };
+
+const codexLocalAdapter = createWrappedCodexLocalAdapter(nativeCodexLocalAdapter);
 
 const cursorLocalAdapter: ServerAdapterModule = {
   type: "cursor",
@@ -506,7 +509,7 @@ const codexRemoteAdapter = createCodexRemoteAdapter({
 
 Remote adapter: codex_remote
 
-Use this adapter when Codex should run in a Cloudflare sandbox environment and the project workspace should be realized by cloning/fetching Git in the sandbox instead of uploading and downloading workspace archives.
+Use this adapter when Codex should run in a Cloudflare sandbox environment.
 
 Runtime rules:
 - Paperclip is the only task-management system for this agent. Do not search for another task-management tool.
@@ -515,12 +518,14 @@ Runtime rules:
 - Use X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID on all mutating Paperclip requests, including comments and issue status updates.
 - To comment, POST JSON to $PAPERCLIP_API_URL/api/issues/$PAPERCLIP_TASK_ID/comments with {"body":"..."}.
 - To finish, PATCH $PAPERCLIP_API_URL/api/issues/$PAPERCLIP_TASK_ID with {"status":"done","comment":"..."}.
+- If task work requires a repository, use the Codebase metadata exposed through $PAPERCLIP_WORKSPACE_REPO_URL and $PAPERCLIP_WORKSPACE_REPO_REF and clone it yourself inside the sandbox.
+- Use Git credentials from environment variables such as GITHUB_TOKEN or GH_TOKEN only when the task requires Git operations.
+- Commit, push, and open a PR only when the assigned task requires it. The adapter will not do Git finalization for you.
 
 Required operator setup:
 - select a Cloudflare sandbox environment for the agent
-- select the Codebase that contains the clean Git repository URL
-- configure GITHUB_TOKEN or GH_TOKEN in the agent env when the repository is private or PR creation is enabled
-- rely on this adapter's workspace realization hint so the sandbox run uses Git clone/fetch instead of archive sync
+- select a Codebase when tasks should expose repository metadata to the agent
+- configure GITHUB_TOKEN or GH_TOKEN in the agent env when tasks may require private repository access or PR creation
 
 Use codex_local for local or SSH execution where Paperclip should use the existing local/remote filesystem workflow.
 `,

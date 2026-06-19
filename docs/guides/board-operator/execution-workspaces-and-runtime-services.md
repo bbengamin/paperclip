@@ -75,7 +75,12 @@ Code state moves between runs through the local execution-workspace cwd alone â€
 
 The invariant is enforced by the "no-remote-git contract" case in `packages/adapter-utils/src/ssh-fixture.test.ts`, which asserts a remote-only commit reaches the local worktree with no remote configured at any point.
 
-Explicit remote Git sandbox adapters are the exception to this default. `codex_remote` uses `workspaceStrategy: "git_clone"` for Git-backed Cloudflare sandbox runs; in that mode the adapter clones or fetches the configured repo inside the sandbox, checks out a work branch, and treats the pushed branch as the handoff artifact instead of uploading/downloading a full workspace archive. This must be adapter/provider-specific and visible in configuration, not an implicit change to local or SSH runs.
+Remote sandbox adapters may choose not to upload/download the host workspace when
+they are runtime-only. `codex_remote` starts Codex in the sandbox working
+directory and exposes Codebase metadata to the agent, but the agent itself owns
+any repository clone, commit, push, or pull request work required by the task.
+This must be adapter-specific and visible in adapter behavior, not an implicit
+change to local or SSH runs.
 
 ## Current implementation guarantees
 

@@ -157,9 +157,11 @@ export async function prepareRemoteCodexHomeAsset(
       const raw = await fs.readFile(configSource, "utf8");
       await fs.writeFile(path.join(dir, "config.toml"), sanitizeRemoteCodexConfigToml(raw), { mode: 0o600 });
     }
-    // Copy the remaining shared files (auth.json, instructions, etc.) verbatim,
-    // following symlinks so the sandbox gets real file contents.
-    for (const name of [...SYMLINKED_SHARED_FILES, "config.json", "instructions.md"]) {
+    // Do not copy auth.json into remote sandboxes. Remote runs should use the
+    // sanitized config.toml provider credentials; copying ChatGPT-mode auth can
+    // make Codex start account/plugin background transports that are irrelevant
+    // in a sandbox and can stall startup.
+    for (const name of ["config.json", "instructions.md"]) {
       const src = path.join(sourceHome, name);
       if (await pathExists(src)) {
         await fs.copyFile(src, path.join(dir, name));

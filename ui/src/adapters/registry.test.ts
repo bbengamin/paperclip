@@ -59,10 +59,10 @@ describe("ui adapter registry", () => {
     expect(codexRemote.type).toBe("codex_remote");
     expect(codexRemote).not.toBe(codexLocalUIAdapter);
     expect(getAdapterLabel("codex_remote")).toBe("Codex (remote)");
-    expect(getAdapterDisplay("codex_remote").description).toContain("Git-backed sandboxes");
+    expect(getAdapterDisplay("codex_remote").description).toContain("sandbox runtimes");
   });
 
-  it("builds Codex Remote config with a Git-clone workspace realization hint", () => {
+  it("builds Codex Remote config without a Git-clone workspace realization hint", () => {
     const config = getUIAdapter("codex_remote").buildAdapterConfig({
       ...defaultCreateValues,
       adapterType: "codex_remote",
@@ -71,10 +71,8 @@ describe("ui adapter registry", () => {
 
     expect(config).toMatchObject({
       model: "gpt-5.3-codex",
-      workspaceRealization: {
-        workspaceStrategy: "git_clone",
-      },
     });
+    expect(config.workspaceRealization).toBeUndefined();
   });
 
 });

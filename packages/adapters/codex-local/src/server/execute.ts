@@ -520,9 +520,16 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const executionTargetIsRemote = adapterExecutionTargetIsRemote(executionTarget);
   const executionTargetIsSandbox =
     executionTarget?.kind === "remote" && executionTarget.transport === "sandbox";
+  const remoteTimingStartedAt = Date.now();
+  const logRemoteTiming = async (message: string) => {
+    if (!executionTargetIsRemote) return;
+    await onLog("stdout", `[paperclip] codex_remote timing +${Date.now() - remoteTimingStartedAt}ms: ${message}\n`);
+  };
+  await logRemoteTiming(`execution target resolved (${describeAdapterExecutionTarget(executionTarget)})`);
   const remoteGitSandboxConfig = parseObject(config.remoteGitSandbox);
-  const providerRealizedRemoteGitWorkspace =
-    executionTargetIsRemote && remoteGitSandboxConfig.enabled === true;
+  const skipRemoteWorkspaceSync =
+    executionTargetIsRemote &&
+    (config.remoteWorkspaceSync === false || remoteGitSandboxConfig.enabled === true);
   const configuredCodexHome =
     typeof envConfig.CODEX_HOME === "string" && envConfig.CODEX_HOME.trim().length > 0
       ? path.resolve(envConfig.CODEX_HOME.trim())
@@ -568,25 +575,28 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const remoteCodexHomeAsset = executionTargetIsRemote
     ? await prepareRemoteCodexHomeAsset(effectiveCodexHome)
     : null;
+  await logRemoteTiming(remoteCodexHomeAsset
+    ? "prepared sanitized remote CODEX_HOME asset without auth.json"
+    : "using local CODEX_HOME");
   const remoteCodexHomeAssetDir = remoteCodexHomeAsset?.dir ?? effectiveCodexHome;
   const preparedExecutionTargetRuntime = executionTargetIsRemote
     ? await (async () => {
         await onLog(
           "stdout",
-          providerRealizedRemoteGitWorkspace
-            ? `[paperclip] Syncing CODEX_HOME to ${describeAdapterExecutionTarget(executionTarget)}; using provider-realized remote Git workspace at ${effectiveExecutionCwd} (skipping workspace archive sync).\n`
+          skipRemoteWorkspaceSync
+            ? `[paperclip] Syncing CODEX_HOME to ${describeAdapterExecutionTarget(executionTarget)}; using remote workspace at ${effectiveExecutionCwd} (skipping workspace archive sync).\n`
             : `[paperclip] Syncing workspace and CODEX_HOME to ${describeAdapterExecutionTarget(executionTarget)}.\n`,
         );
-        return await prepareAdapterExecutionTargetRuntime({
+        const prepared = await prepareAdapterExecutionTargetRuntime({
           runId,
           target: executionTarget,
           adapterKey: "codex",
           timeoutSec,
           workspaceLocalDir: cwd,
-          // For a provider-realized remote Git workspace, the repo is already
-          // cloned at the remote cwd. Anchor the runtime (and thus the synced
-          // CODEX_HOME asset) there without overwriting the clone.
-          ...(providerRealizedRemoteGitWorkspace
+          // For runtime-owned remote workspaces, anchor the runtime (and thus
+          // the synced CODEX_HOME asset) at the target cwd without uploading
+          // or overwriting a host workspace archive.
+          ...(skipRemoteWorkspaceSync
             ? { workspaceRemoteDir: effectiveExecutionCwd, syncWorkspace: false }
             : {}),
           installCommand: SANDBOX_INSTALL_COMMAND,
@@ -599,6 +609,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
             },
           ],
         });
+        await logRemoteTiming(`synced remote runtime assets to ${prepared.workspaceRemoteDir}`);
+        return prepared;
       })().catch(async (error) => {
         await remoteCodexHomeAsset?.cleanup();
         throw error;
@@ -746,6 +758,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     if (paperclipBridge) {
       Object.assign(env, paperclipBridge.env);
     }
+    await logRemoteTiming("sandbox callback bridge started");
   }
   const effectiveEnv = Object.fromEntries(
     Object.entries({ ...process.env, ...env }).filter(
@@ -769,8 +782,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     graceSec,
     onLog,
   });
+  await logRemoteTiming("runtime command install/probe completed");
   await ensureAdapterExecutionTargetCommandResolvable(command, executionTarget, cwd, runtimeEnv);
   const resolvedCommand = await resolveAdapterExecutionTargetCommandForLogs(command, executionTarget, cwd, runtimeEnv);
+  await logRemoteTiming(`resolved command ${resolvedCommand}`);
   const loggedEnv = buildInvocationEnvForLogs(env, {
     runtimeEnv,
     includeRuntimeKeys: ["HOME"],
@@ -926,6 +941,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   };
 
   const runAttempt = async (resumeSessionId: string | null) => {
+    await logRemoteTiming(resumeSessionId ? `starting Codex resume ${resumeSessionId}` : "starting fresh Codex exec");
     const execArgs = buildCodexExecArgs(
       forceSaferInvocation ? { ...config, fastMode: false } : config,
       {
@@ -956,6 +972,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       });
     }
 
+    let firstOutputLogged = false;
     const proc = await runAdapterExecutionTargetProcess(runId, runtimeExecutionTarget, command, args, {
       cwd,
       env,
@@ -964,6 +981,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       graceSec,
       onSpawn,
       onLog: async (stream, chunk) => {
+        if (!firstOutputLogged && chunk.length > 0) {
+          firstOutputLogged = true;
+          await logRemoteTiming(`first Codex ${stream} chunk received (${Buffer.byteLength(chunk, "utf8")} bytes)`);
+        }
         if (stream === "stdout") {
           const collected = collectCodexProgressMessages({ buffer: codexProgressBuffer, chunk });
           codexProgressBuffer = collected.buffer;
@@ -980,6 +1001,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         await onLog(stream, cleaned);
       },
     });
+    await logRemoteTiming(`Codex process completed exit=${proc.exitCode ?? "null"} timedOut=${proc.timedOut}`);
     const cleanedStderr = stripCodexRolloutNoise(proc.stderr);
     return {
       proc: {
@@ -1090,6 +1112,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       timeoutSec,
       onLog,
     });
+    await logRemoteTiming(preflightFailure ? "sandbox Paperclip preflight failed" : "sandbox Paperclip preflight passed");
     if (preflightFailure) return preflightFailure;
 
     const initial = await runAttempt(sessionId);

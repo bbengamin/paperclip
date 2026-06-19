@@ -76,7 +76,7 @@ const adapterDisplayMap: Record<string, AdapterDisplayInfo> = {
   },
   codex_remote: {
     label: "Codex",
-    description: "Remote Codex agent for Git-backed sandboxes",
+    description: "Remote Codex agent for sandbox runtimes",
     icon: Code,
     experimental: true,
   },

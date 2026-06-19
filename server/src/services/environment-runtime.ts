@@ -166,6 +166,66 @@ function retainedSandboxLeaseMatchesIssueScope(input: {
   return true;
 }
 
+const DEFAULT_TASK_SCOPED_SANDBOX_SLEEP_AFTER = "10m";
+
+function shouldUseTaskScopedSandboxReuse(input: {
+  issueId: string | null;
+  heartbeatRunId: string | null;
+}): boolean {
+  return Boolean(input.issueId && input.heartbeatRunId);
+}
+
+function withTaskScopedSandboxReuseConfig<T extends Record<string, unknown>>(
+  config: T,
+  enabled: boolean,
+): T {
+  if (!enabled) return config;
+  const sleepAfter = typeof config.sleepAfter === "string" && config.sleepAfter.trim().length > 0
+    ? config.sleepAfter
+    : DEFAULT_TASK_SCOPED_SANDBOX_SLEEP_AFTER;
+  return {
+    ...config,
+    reuseLease: true,
+    keepAlive: true,
+    sleepAfter,
+  };
+}
+
+function reusableSandboxLeaseMatchesTaskScope(input: {
+  lease: EnvironmentLease;
+  issueId: string | null;
+}): boolean {
+  if (!input.issueId || input.lease.issueId !== input.issueId) return false;
+  if (!input.lease.providerLeaseId) return false;
+  if (input.lease.status === "active") return false;
+  if (input.lease.leasePolicy === "reuse_by_environment") return true;
+  return retainedSandboxLeaseMatchesIssueScope(input);
+}
+
+function findTaskScopedReusableSandboxLease(input: {
+  leases: EnvironmentLease[];
+  issueId: string | null;
+  executionWorkspaceId: string | null;
+}): EnvironmentLease | null {
+  const candidates = input.leases.filter((lease) =>
+    reusableSandboxLeaseMatchesTaskScope({
+      lease,
+      issueId: input.issueId,
+    })
+  );
+  return candidates.find((lease) =>
+    lease.executionWorkspaceId === input.executionWorkspaceId
+  ) ?? candidates[0] ?? null;
+}
+
+function isSandboxStateLossError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /sandbox_state_lost/i.test(message) ||
+    /Cloudflare sandbox state is no longer available/i.test(message) ||
+    /Durable Object storage/i.test(message) ||
+    /object to be reset/i.test(message);
+}
+
 export interface EnvironmentDriverLeaseInput {
   environment: Environment;
   lease: EnvironmentLease;
@@ -466,8 +526,18 @@ function createSandboxEnvironmentDriver(
           );
         }
 
-        const workerConfig = stripSandboxProviderEnvelope(parsed.config);
-        const storedConfig = storedParsed.config;
+        const taskScopedReuse = shouldUseTaskScopedSandboxReuse({
+          issueId: input.issueId,
+          heartbeatRunId: input.heartbeatRunId,
+        });
+        const workerConfig = withTaskScopedSandboxReuseConfig(
+          stripSandboxProviderEnvelope(parsed.config),
+          taskScopedReuse,
+        );
+        const storedConfig = withTaskScopedSandboxReuseConfig(
+          storedParsed.config as unknown as Record<string, unknown>,
+          taskScopedReuse,
+        ) as unknown as SandboxEnvironmentConfig;
         // Ad-hoc tests (heartbeatRunId === null) must never resume an existing
         // provider lease. If they did, releasing the test lease at the end of
         // the probe would tear down the live heartbeat run that owns it.
@@ -484,7 +554,30 @@ function createSandboxEnvironmentDriver(
                 })
               )
           : [];
-        const retainedLease = reusableExistingLeases.find((lease) =>
+        const taskScopedReusableLease = taskScopedReuse
+          ? findTaskScopedReusableSandboxLease({
+              leases: reusableExistingLeases,
+              issueId: input.issueId,
+              executionWorkspaceId: input.executionWorkspaceId,
+            })
+          : null;
+        if (taskScopedReuse) {
+          log.info(
+            {
+              environmentId: input.environment.id,
+              issueId: input.issueId,
+              executionWorkspaceId: input.executionWorkspaceId,
+              reusableLeaseId: taskScopedReusableLease?.id ?? null,
+              providerLeaseId: taskScopedReusableLease?.providerLeaseId ?? null,
+              reusableLeaseStatus: taskScopedReusableLease?.status ?? null,
+              reusableLeasePolicy: taskScopedReusableLease?.leasePolicy ?? null,
+            },
+            taskScopedReusableLease
+              ? "found task-scoped reusable sandbox lease"
+              : "no task-scoped reusable sandbox lease found",
+          );
+        }
+        const retainedLease = taskScopedReusableLease ?? reusableExistingLeases.find((lease) =>
           retainedSandboxLeaseMatchesIssueScope({
             lease,
             issueId: input.issueId,
@@ -500,7 +593,7 @@ function createSandboxEnvironmentDriver(
         ) ?? null;
         const retainedProviderLeaseId = retainedLease?.providerLeaseId ?? null;
         const reusableProviderLeaseId = retainedProviderLeaseId ??
-          (parsed.config.reuseLease && input.heartbeatRunId !== null
+          (!taskScopedReuse && parsed.config.reuseLease && input.heartbeatRunId !== null
             ? findReusableSandboxLeaseId({
                 config: storedConfig,
                 leases: reusableExistingLeases.filter((lease) => lease.leasePolicy === "reuse_by_environment"),
@@ -510,6 +603,7 @@ function createSandboxEnvironmentDriver(
           ? reusableExistingLeases.find((lease) => lease.providerLeaseId === reusableProviderLeaseId)
           : null;
 
+        let resumeError: unknown = null;
         const providerLease = reusableLease?.providerLeaseId
           ? await pluginWorkerManager.call(
               pluginProvider.resolved.plugin.id,
@@ -528,12 +622,53 @@ function createSandboxEnvironmentDriver(
               typeof resumed.providerLeaseId === "string" && resumed.providerLeaseId.length > 0
                 ? resumed
                 : null,
-            ).catch(() => null)
+            ).catch((error) => {
+              resumeError = error;
+              return null;
+            })
           : null;
-        if (retainedLease && reusableLease?.id === retainedLease.id && !providerLease) {
-          await environmentsSvc.releaseLease(retainedLease.id, "expired", {
-            failureReason: "retained_provider_lease_unavailable",
-            cleanupStatus: "failed",
+        if (reusableLease?.providerLeaseId) {
+          log.info(
+            {
+              environmentId: input.environment.id,
+              issueId: input.issueId,
+              leaseId: reusableLease.id,
+              providerLeaseId: reusableLease.providerLeaseId,
+              resumed: Boolean(providerLease),
+            },
+            providerLease ? "resumed reusable sandbox lease" : "failed to resume reusable sandbox lease; retiring old lease and acquiring new",
+          );
+        }
+        if (reusableLease?.providerLeaseId && !providerLease) {
+          let cleanupStatus: "success" | "failed" = "success";
+          try {
+            await pluginWorkerManager.call(pluginProvider.resolved.plugin.id, "environmentDestroyLease", {
+              driverKey: parsed.config.provider,
+              companyId: input.companyId,
+              environmentId: input.environment.id,
+              issueId: input.issueId,
+              config: workerConfig,
+              providerLeaseId: reusableLease.providerLeaseId,
+              leaseMetadata: reusableLease.metadata ?? undefined,
+            }, resolvePluginSandboxRpcTimeoutMs(workerConfig));
+          } catch (error) {
+            cleanupStatus = "failed";
+            log.warn(
+              {
+                environmentId: input.environment.id,
+                issueId: input.issueId,
+                leaseId: reusableLease.id,
+                providerLeaseId: reusableLease.providerLeaseId,
+                err: error instanceof Error ? error.message : String(error),
+              },
+              "failed to destroy stale reusable sandbox lease after resume failure",
+            );
+          }
+          await environmentsSvc.releaseLease(reusableLease.id, "expired", {
+            failureReason: resumeError && isSandboxStateLossError(resumeError)
+              ? "sandbox_state_lost"
+              : "reusable_provider_lease_unavailable",
+            cleanupStatus,
           });
         }
         const acquiredLease = providerLease ?? await pluginWorkerManager.call(
@@ -557,7 +692,7 @@ function createSandboxEnvironmentDriver(
         // Ad-hoc test leases are never publishable for reuse: storing them
         // as `reuse_by_environment` would let a concurrent heartbeat resume
         // the test's provider lease and lose its sandbox when the test ends.
-        const resolvedLeasePolicy = parsed.config.reuseLease && input.heartbeatRunId !== null
+        const resolvedLeasePolicy = (taskScopedReuse || parsed.config.reuseLease) && input.heartbeatRunId !== null
           ? "reuse_by_environment"
           : input.heartbeatRunId !== null && input.issueId
             ? "retain_on_failure"
@@ -584,6 +719,14 @@ function createSandboxEnvironmentDriver(
               metadata: acquiredLease.metadata,
               schema: pluginProvider.resolved.driver.configSchema as Record<string, unknown> | null | undefined,
             }),
+            ...(taskScopedReuse ? {
+              reuseLease: true,
+              keepAlive: true,
+              sleepAfter:
+                typeof workerConfig.sleepAfter === "string" && workerConfig.sleepAfter.trim().length > 0
+                  ? workerConfig.sleepAfter
+                  : DEFAULT_TASK_SCOPED_SANDBOX_SLEEP_AFTER,
+            } : {}),
           },
         });
       }
@@ -797,6 +940,51 @@ function createSandboxEnvironmentDriver(
               requestedTimeoutMs: input.timeoutMs,
               config: sanitizedConfig,
             }));
+          } catch (error) {
+            if (isSandboxStateLossError(error)) {
+              let cleanupStatus: "success" | "failed" = "success";
+              try {
+                await pluginWorkerManager.call(pluginId, "environmentDestroyLease", {
+                  driverKey: providerKey,
+                  companyId: input.lease.companyId,
+                  environmentId: input.environment.id,
+                  issueId: input.lease.issueId,
+                  config: sanitizedConfig,
+                  providerLeaseId: input.lease.providerLeaseId,
+                  leaseMetadata: input.lease.metadata ?? undefined,
+                }, resolvePluginSandboxRpcTimeoutMs(sanitizedConfig));
+              } catch (destroyError) {
+                cleanupStatus = "failed";
+                log.warn(
+                  {
+                    pluginId,
+                    providerKey,
+                    environmentId: input.environment.id,
+                    leaseId: input.lease.id,
+                    providerLeaseId: input.lease.providerLeaseId,
+                    err: destroyError instanceof Error ? destroyError.message : String(destroyError),
+                  },
+                  "failed to destroy sandbox lease after provider state loss",
+                );
+              }
+              await environmentsSvc.releaseLease(input.lease.id, "failed", {
+                failureReason: "sandbox_state_lost",
+                cleanupStatus,
+              });
+              log.warn(
+                {
+                  pluginId,
+                  providerKey,
+                  environmentId: input.environment.id,
+                  leaseId: input.lease.id,
+                  providerLeaseId: input.lease.providerLeaseId,
+                  cleanupStatus,
+                  err: error instanceof Error ? error.message : String(error),
+                },
+                "retired sandbox lease after provider state loss",
+              );
+            }
+            throw error;
           } finally {
             unsubscribe?.();
           }

@@ -22,12 +22,7 @@ const codexRemoteUIAdapter: UIAdapterModule = {
   ...codexLocalUIAdapter,
   type: "codex_remote",
   label: "Codex (remote)",
-  buildAdapterConfig: (values) => ({
-    ...codexLocalUIAdapter.buildAdapterConfig(values),
-    workspaceRealization: {
-      workspaceStrategy: "git_clone",
-    },
-  }),
+  buildAdapterConfig: codexLocalUIAdapter.buildAdapterConfig,
 };
 
 // Types registered at module load time — allowed to be overridden by

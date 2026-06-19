@@ -80,6 +80,23 @@ export type {
   RemoteGitSandboxSpec,
   RemoteGitSandboxWorkspaceContext,
 } from "./remote-git-sandbox.js";
+export {
+  DEFAULT_PAPERCLIP_API_SAFETY_PROMPT,
+  PAPERCLIP_API_KEY_ENV,
+  PAPERCLIP_RUN_ID_ENV,
+  applyPaperclipRuntimeEnv,
+  composePaperclipPromptGuard,
+  patchPaperclipRuntimeExecutionContext,
+  resolvePaperclipRuntimeStateStrategy,
+} from "./paperclip-runtime-wrapper.js";
+export type {
+  PaperclipPromptGuardInput,
+  PaperclipPromptGuardMode,
+  PaperclipRuntimeEnvInput,
+  PaperclipRuntimeStateStrategy,
+  PaperclipRuntimeStateStrategyInput,
+  PaperclipRuntimeStateStrategyResult,
+} from "./paperclip-runtime-wrapper.js";
 export { inferOpenAiCompatibleBiller } from "./billing.js";
 // Keep the root adapter-utils entry browser-safe because the UI imports it.
 // The sandbox callback bridge stays available via its dedicated subpath export.

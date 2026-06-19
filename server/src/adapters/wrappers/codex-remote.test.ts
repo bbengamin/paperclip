@@ -34,13 +34,16 @@ function fail(stderr: string): RunProcessResult {
 
 function createRunner(handler?: (script: string) => RunProcessResult) {
   const scripts: string[] = [];
+  const envs: Array<Record<string, string> | undefined> = [];
   return {
     scripts,
+    envs,
     runner: {
-      execute: vi.fn(async (input: { args?: string[] }) => {
+      execute: vi.fn(async (input: { args?: string[]; env?: Record<string, string> }) => {
         const script = input.args?.[1] ?? "";
         scripts.push(script);
-        return handler?.(script) ?? ok();
+        envs.push(input.env);
+        return handler?.(script) ?? ok("workspace\n");
       }),
     },
   };
@@ -51,8 +54,11 @@ function createContext(input: {
   workspace?: Record<string, unknown>;
   handler?: (script: string) => RunProcessResult;
   authToken?: string;
-} = {}): AdapterExecutionContext & { runnerScripts: string[] } {
-  const { runner, scripts } = createRunner(input.handler);
+} = {}): AdapterExecutionContext & {
+  runnerScripts: string[];
+  runnerEnvs: Array<Record<string, string> | undefined>;
+} {
+  const { runner, scripts, envs } = createRunner(input.handler);
   return {
     runId: "run-1",
     agent: {
@@ -94,6 +100,7 @@ function createContext(input: {
     onLog: async () => {},
     authToken: input.authToken,
     runnerScripts: scripts,
+    runnerEnvs: envs,
   };
 }
 
@@ -121,7 +128,7 @@ describe("codex_remote wrapper", () => {
     vi.unstubAllEnvs();
   });
 
-  it("defaults workspace realization to Git clone without dropping existing config", () => {
+  it("defaults to sandbox runtime without requesting Git clone realization", () => {
     expect(applyCodexRemoteDefaults({
       model: "gpt-5.3-codex",
       workspaceRealization: {
@@ -131,8 +138,8 @@ describe("codex_remote wrapper", () => {
       model: "gpt-5.3-codex",
       timeoutSec: 300,
       dangerouslyBypassApprovalsAndSandbox: true,
+      remoteWorkspaceSync: false,
       workspaceRealization: {
-        workspaceStrategy: "git_clone",
         workBranch: "paperclip/RL-203",
       },
     });
@@ -143,7 +150,7 @@ describe("codex_remote wrapper", () => {
     expect(applyCodexRemoteDefaults({ timeoutSec: 0 })).toMatchObject({ timeoutSec: 300 });
   });
 
-  it("prepares Git workspace, runs Codex remotely, commits, and pushes", async () => {
+  it("verifies sandbox cwd and delegates to Codex without Git finalization", async () => {
     const execute = vi.fn<ServerAdapterModule["execute"]>(async () => ({
       exitCode: 0,
       signal: null,
@@ -151,14 +158,7 @@ describe("codex_remote wrapper", () => {
       resultJson: { codex: "ok" },
     }));
     const adapter = createCodexRemoteAdapter({ base: createBaseAdapter(execute) });
-    const ctx = createContext({
-      config: { model: "gpt-5.3-codex" },
-      handler: (script) => {
-        if (script === "git status --porcelain=v1") return ok(" M README.md\n");
-        if (script === "git rev-parse HEAD") return ok("abc123\n");
-        return ok();
-      },
-    });
+    const ctx = createContext({ config: { model: "gpt-5.3-codex" } });
 
     const result = await adapter.execute(ctx);
 
@@ -168,41 +168,42 @@ describe("codex_remote wrapper", () => {
     expect(delegatedCtx?.config).toMatchObject({
       model: "gpt-5.3-codex",
       dangerouslyBypassApprovalsAndSandbox: true,
-      workspaceRealization: {
-        workspaceStrategy: "git_clone",
-      },
-      remoteGitSandbox: {
-        enabled: true,
-        workBranch: "paperclip/cloudflare/RL-201",
-        remoteCwd: "/workspace/paperclip",
-      },
+      remoteWorkspaceSync: false,
     });
+    expect(delegatedCtx?.config.workspaceRealization).toBeUndefined();
+    expect(delegatedCtx?.config.remoteGitSandbox).toBeUndefined();
     expect(delegatedCtx?.executionTarget).toMatchObject({
       kind: "remote",
       transport: "sandbox",
       remoteCwd: "/workspace/paperclip",
     });
-    expect(result.resultJson).toMatchObject({
-      codex: "ok",
-      remoteGit: {
-        dirty: true,
-        commitSha: "abc123",
-        pushed: true,
-        pushedBranch: "paperclip/cloudflare/RL-201",
-        pullRequestSkippedReason: "missing_github_repo_credential",
-      },
+    expect(delegatedCtx?.context.paperclipWorkspace).toMatchObject({
+      repoUrl: "https://github.com/example/repo",
+      repoRef: "main",
     });
-    expect(ctx.runnerScripts.join("\n")).toContain("git clone --no-checkout");
-    expect(ctx.runnerScripts.join("\n")).toContain("git checkout -B 'paperclip/cloudflare/RL-201' FETCH_HEAD");
-    expect(ctx.runnerScripts.join("\n")).toContain("git push \"$auth_repo_url\" HEAD:refs/heads/'paperclip/cloudflare/RL-201'");
-    expect(ctx.runnerScripts.join("\n")).not.toMatch(/\btar\b|base64|workspace-upload|workspace-download/);
+    expect(result.resultJson).toMatchObject({ codex: "ok" });
+
+    const scripts = ctx.runnerScripts.join("\n");
+    expect(scripts).toContain("WORKSPACE_OK");
+    expect(scripts).toContain("BRIDGE_SESSION_OK");
+    expect(scripts).not.toMatch(/git clone|git checkout|git commit|git push|git status/);
+    expect(scripts).not.toMatch(/\btar\b|base64|workspace-upload|workspace-download/);
   });
 
-  it("surfaces clone failures before running Codex", async () => {
+  it("uses the bridge channel for the bridge warmup probe", async () => {
+    const adapter = createCodexRemoteAdapter({ base: createBaseAdapter() });
+    const ctx = createContext();
+
+    await adapter.execute(ctx);
+
+    expect(ctx.runnerEnvs).toContainEqual({ PAPERCLIP_SANDBOX_EXEC_CHANNEL: "bridge" });
+  });
+
+  it("surfaces sandbox warmup failures before running Codex", async () => {
     const execute = vi.fn<ServerAdapterModule["execute"]>();
     const adapter = createCodexRemoteAdapter({ base: createBaseAdapter(execute) });
     const ctx = createContext({
-      handler: (script) => script.includes("git clone") ? fail("repository not found") : ok(),
+      handler: (script) => script.includes("WORKSPACE_OK") ? fail("workspace unavailable") : ok(),
     });
 
     const result = await adapter.execute(ctx);
@@ -210,89 +211,12 @@ describe("codex_remote wrapper", () => {
     expect(execute).not.toHaveBeenCalled();
     expect(result.exitCode).toBe(1);
     expect(result.errorMessage).toContain("codex_remote_prepare_failed");
-    expect(result.errorMessage).toContain("repository not found");
+    expect(result.errorMessage).toContain("workspace unavailable");
   });
 
-  it("finalizes after Codex execution fails so dirty work is still observable", async () => {
-    const execute = vi.fn<ServerAdapterModule["execute"]>(async () => ({
-      exitCode: 1,
-      signal: null,
-      timedOut: false,
-      errorMessage: "Codex auth failed",
-    }));
-    const adapter = createCodexRemoteAdapter({ base: createBaseAdapter(execute) });
-    const ctx = createContext();
-
-    const result = await adapter.execute(ctx);
-
-    expect(result.errorMessage).toBe("Codex auth failed");
-    expect(ctx.runnerScripts.join("\n")).toContain("git status --porcelain=v1");
-    expect(ctx.runnerScripts.join("\n")).not.toContain("git push origin");
-  });
-
-  it("creates a GitHub pull request after pushing a dirty branch", async () => {
-    const fetchMock = vi.fn(async () =>
-      new Response(JSON.stringify({ html_url: "https://github.com/example/repo/pull/42" }), {
-        status: 201,
-        headers: { "content-type": "application/json" },
-      }),
-    );
-    vi.stubGlobal("fetch", fetchMock);
-    const execute = vi.fn<ServerAdapterModule["execute"]>(async () => ({
-      exitCode: 0,
-      signal: null,
-      timedOut: false,
-    }));
-    const adapter = createCodexRemoteAdapter({ base: createBaseAdapter(execute) });
-    const ctx = createContext({
-      config: {
-        env: {
-          GITHUB_TOKEN: "ghp_testtoken",
-        },
-      },
-      handler: (script) => {
-        if (script === "git status --porcelain=v1") return ok(" M README.md\n");
-        if (script === "git rev-parse HEAD") return ok("abc123\n");
-        return ok();
-      },
-    });
-
-    const result = await adapter.execute(ctx);
-
-    expect(fetchMock).toHaveBeenCalledWith(
-      "https://api.github.com/repos/example/repo/pulls",
-      expect.objectContaining({
-        method: "POST",
-        headers: expect.objectContaining({
-          authorization: "Bearer ghp_testtoken",
-        }),
-      }),
-    );
-    expect(result.resultJson).toMatchObject({
-      remoteGit: {
-        pullRequestUrl: "https://github.com/example/repo/pull/42",
-        pullRequestCreated: true,
-      },
-    });
-  });
-
-  it("marks the Paperclip issue done from the host after opening a pull request", async () => {
+  it("does not call GitHub or host Paperclip close-out APIs", async () => {
     vi.stubEnv("PAPERCLIP_API_URL", "http://paperclip.local/");
-    const fetchMock = vi.fn(async (url: string, _init?: RequestInit) => {
-      if (url === "https://api.github.com/repos/example/repo/pulls") {
-        return new Response(JSON.stringify({ html_url: "https://github.com/example/repo/pull/42" }), {
-          status: 201,
-          headers: { "content-type": "application/json" },
-        });
-      }
-      if (url === "http://paperclip.local/api/issues/issue-201") {
-        return new Response(JSON.stringify({ id: "issue-201", status: "done" }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        });
-      }
-      return new Response("unexpected url", { status: 500 });
-    });
+    const fetchMock = vi.fn(async () => new Response("unexpected", { status: 500 }));
     vi.stubGlobal("fetch", fetchMock);
     const execute = vi.fn<ServerAdapterModule["execute"]>(async () => ({
       exitCode: 0,
@@ -307,123 +231,10 @@ describe("codex_remote wrapper", () => {
           GITHUB_TOKEN: "ghp_testtoken",
         },
       },
-      handler: (script) => {
-        if (script === "git status --porcelain=v1") return ok(" M README.md\n");
-        if (script === "git rev-parse HEAD") return ok("abc123\n");
-        return ok();
-      },
     });
 
-    const result = await adapter.execute(ctx);
+    await adapter.execute(ctx);
 
-    expect(fetchMock).toHaveBeenCalledWith(
-      "http://paperclip.local/api/issues/issue-201",
-      expect.objectContaining({
-        method: "PATCH",
-        headers: expect.objectContaining({
-          authorization: "Bearer run-jwt-token",
-          "content-type": "application/json",
-        }),
-        body: expect.any(String),
-      }),
-    );
-    const patchCall = fetchMock.mock.calls.find(([url]) => url === "http://paperclip.local/api/issues/issue-201");
-    const patchBody = JSON.parse(String((patchCall?.[1] as RequestInit | undefined)?.body));
-    expect(patchBody).toMatchObject({ status: "done" });
-    expect(patchBody.comment).toContain("https://github.com/example/repo/pull/42");
-    expect(patchBody.comment).toContain("paperclip/cloudflare/RL-201");
-    expect(result.resultJson).toMatchObject({
-      remoteGit: {
-        paperclipCloseout: {
-          attempted: true,
-          ok: true,
-        },
-      },
-    });
-  });
-
-  it("reports success when host close-out succeeds after the base adapter failed late", async () => {
-    vi.stubEnv("PAPERCLIP_API_URL", "http://paperclip.local");
-    const fetchMock = vi.fn(async (url: string, _init?: RequestInit) => {
-      if (url === "https://api.github.com/repos/example/repo/pulls") {
-        return new Response(JSON.stringify({ html_url: "https://github.com/example/repo/pull/43" }), {
-          status: 201,
-          headers: { "content-type": "application/json" },
-        });
-      }
-      if (url === "http://paperclip.local/api/issues/issue-201") {
-        return new Response(JSON.stringify({ id: "issue-201", status: "done" }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        });
-      }
-      return new Response("unexpected url", { status: 500 });
-    });
-    vi.stubGlobal("fetch", fetchMock);
-    const execute = vi.fn<ServerAdapterModule["execute"]>(async () => ({
-      exitCode: 1,
-      signal: null,
-      timedOut: false,
-      errorMessage: "callback bridge timed out after finishing",
-      errorCode: "sandbox_callback_timeout",
-    }));
-    const adapter = createCodexRemoteAdapter({ base: createBaseAdapter(execute) });
-    const ctx = createContext({
-      authToken: "run-jwt-token",
-      config: {
-        env: {
-          GITHUB_TOKEN: "ghp_testtoken",
-        },
-      },
-      handler: (script) => {
-        if (script === "git status --porcelain=v1") return ok(" M README.md\n");
-        if (script === "git rev-parse HEAD") return ok("def456\n");
-        return ok();
-      },
-    });
-
-    const result = await adapter.execute(ctx);
-
-    expect(result.exitCode).toBe(0);
-    expect(result.timedOut).toBe(false);
-    expect(result.errorMessage).toBeNull();
-    expect(result.errorCode).toBeNull();
-    expect(result.resultJson).toMatchObject({
-      codexRemoteOriginalResult: {
-        exitCode: 1,
-        errorMessage: "callback bridge timed out after finishing",
-        errorCode: "sandbox_callback_timeout",
-      },
-      remoteGit: {
-        commitSha: "def456",
-        pullRequestUrl: "https://github.com/example/repo/pull/43",
-        paperclipCloseout: {
-          ok: true,
-        },
-      },
-    });
-  });
-
-  it("surfaces push failures after Codex succeeds", async () => {
-    const execute = vi.fn<ServerAdapterModule["execute"]>(async () => ({
-      exitCode: 0,
-      signal: null,
-      timedOut: false,
-    }));
-    const adapter = createCodexRemoteAdapter({ base: createBaseAdapter(execute) });
-    const ctx = createContext({
-      handler: (script) => {
-        if (script === "git status --porcelain=v1") return ok(" M README.md\n");
-        if (script === "git rev-parse HEAD") return ok("abc123\n");
-        if (script.includes("git push \"$auth_repo_url\"")) return fail("permission denied");
-        return ok();
-      },
-    });
-
-    const result = await adapter.execute(ctx);
-
-    expect(result.exitCode).toBe(1);
-    expect(result.errorMessage).toContain("codex_remote_finalize_failed");
-    expect(result.errorMessage).toContain("permission denied");
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

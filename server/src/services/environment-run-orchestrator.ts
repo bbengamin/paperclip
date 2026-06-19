@@ -396,7 +396,10 @@ export function environmentRunOrchestrator(
           typeof lease.metadata?.remoteCwd === "string" && lease.metadata.remoteCwd.trim().length > 0
             ? lease.metadata.remoteCwd
             : undefined;
-        const workspaceRealizationHints = readWorkspaceRealizationHints(input.adapterConfig);
+        const workspaceRealizationHints =
+          adapterType === "codex_remote"
+            ? {}
+            : readWorkspaceRealizationHints(input.adapterConfig);
         const workspaceRealizationResult = await environmentRuntime.realizeWorkspace({
           environment,
           lease,

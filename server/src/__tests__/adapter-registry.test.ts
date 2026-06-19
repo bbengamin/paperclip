@@ -202,7 +202,8 @@ describe("server adapter registry", () => {
     expect(remoteCodex).not.toBeNull();
     expect(remoteCodex).not.toBe(nativeCodex);
     expect(remoteCodex?.supportsLocalAgentJwt).toBe(true);
-    expect(remoteCodex?.agentConfigurationDoc).toContain("workspaceStrategy: \"git_clone\"");
+    expect(remoteCodex?.agentConfigurationDoc).toContain("clone it yourself inside the sandbox");
+    expect(remoteCodex?.agentConfigurationDoc).not.toContain("workspaceStrategy: \"git_clone\"");
   });
 
   it("keeps unrelated external adapters separate from Codex Remote", () => {
