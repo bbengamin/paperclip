@@ -1,6 +1,6 @@
 # Codex Remote
 
-`codex_remote` runs Codex in a remote Git-backed sandbox workflow. It is intended for sandbox providers such as Cloudflare or Daytona where the sandbox can clone/fetch the repository directly, run Codex in that checkout, then commit and push the resulting work branch.
+`codex_remote` runs Codex in a Cloudflare Git-backed sandbox workflow. The sandbox clones/fetches the repository directly, runs Codex in that checkout, then commits and pushes the resulting work branch.
 
 Use it when:
 
@@ -44,7 +44,7 @@ The expected flow is:
 1. Agent wakes up.
 2. Paperclip acquires or resumes a sandbox lease.
 3. The `codex_remote` wrapper clones/fetches the project repo in the sandbox.
-4. The wrapper checks out a work branch such as `paperclip/daytona/<issue>`.
+4. The wrapper checks out a work branch such as `paperclip/cloudflare/<issue>`.
 5. Codex runs in that sandbox checkout.
 6. Plugin stream events send Codex stdout/stderr progress back to Paperclip while Codex runs.
 7. Remote work is committed and pushed through the Git-backed sandbox flow.

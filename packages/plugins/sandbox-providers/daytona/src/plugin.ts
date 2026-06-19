@@ -42,7 +42,6 @@ interface DaytonaDriverConfig {
   autoArchiveInterval: number | null;
   autoDeleteInterval: number | null;
   reuseLease: boolean;
-  workspaceStrategy: "git_clone" | null;
 }
 
 function parseOptionalString(value: unknown): string | null {
@@ -63,7 +62,6 @@ function parseOptionalNumber(value: unknown): number | null {
 
 function parseDriverConfig(raw: Record<string, unknown>): DaytonaDriverConfig {
   const timeoutMs = Number(raw.timeoutMs ?? 300_000);
-  const workspaceStrategy = parseOptionalString(raw.workspaceStrategy);
   return {
     apiKey: parseOptionalString(raw.apiKey),
     apiUrl: parseOptionalString(raw.apiUrl),
@@ -80,7 +78,6 @@ function parseDriverConfig(raw: Record<string, unknown>): DaytonaDriverConfig {
     autoArchiveInterval: parseOptionalInteger(raw.autoArchiveInterval),
     autoDeleteInterval: parseOptionalInteger(raw.autoDeleteInterval),
     reuseLease: raw.reuseLease === true,
-    workspaceStrategy: workspaceStrategy === "git_clone" || workspaceStrategy === "remote_git" ? "git_clone" : null,
   };
 }
 
@@ -169,16 +166,6 @@ function formatErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function asObject(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : {};
-}
-
-function readString(value: unknown): string | null {
-  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
-}
-
 function isValidUrl(value: string): boolean {
   try {
     new URL(value);
@@ -186,164 +173,6 @@ function isValidUrl(value: string): boolean {
   } catch {
     return false;
   }
-}
-
-function readWorkspaceRealizationRequest(metadata: Record<string, unknown>): Record<string, unknown> {
-  const workspaceRealizationRequest = asObject(metadata.workspaceRealizationRequest);
-  return Object.keys(workspaceRealizationRequest).length > 0
-    ? workspaceRealizationRequest
-    : asObject(metadata.request);
-}
-
-function readWorkspaceRealizationSource(metadata: Record<string, unknown>): Record<string, unknown> {
-  const request = readWorkspaceRealizationRequest(metadata);
-  return asObject(request.source);
-}
-
-function resolveWorkspaceStrategy(params: PluginEnvironmentRealizeWorkspaceParams, config: DaytonaDriverConfig): "git_clone" | null {
-  const metadata = asObject(params.workspace.metadata);
-  const metadataStrategy = readString(metadata.workspaceStrategy) ?? readString(metadata.syncStrategy);
-  if (metadataStrategy === "git_clone" || metadataStrategy === "remote_git") return "git_clone";
-  return config.workspaceStrategy;
-}
-
-interface DaytonaGitWorkspaceSpec {
-  repoUrl: string;
-  baseRef: string;
-  workBranch: string;
-  remoteCwd: string;
-  setupCommand: string | null;
-}
-
-interface DaytonaCommandResult {
-  exitCode: number | null;
-  timedOut: boolean;
-  stdout: string;
-  stderr: string;
-}
-
-interface DaytonaGitWorkspaceRunner {
-  execute(input: {
-    command: string;
-    args?: string[];
-    cwd?: string;
-    env?: Record<string, string>;
-    timeoutMs?: number;
-  }): Promise<DaytonaCommandResult>;
-}
-
-function sanitizeBranchPart(value: string): string {
-  return value
-    .trim()
-    .replace(/\\/g, "/")
-    .replace(/[^A-Za-z0-9._/-]+/g, "-")
-    .replace(/\/+/g, "/")
-    .replace(/^[/.]+|[/.]+$/g, "")
-    .replace(/\.lock$/i, "lock");
-}
-
-function deriveDaytonaGitWorkspaceSpec(input: {
-  repoUrl: string;
-  baseRef: string | null;
-  issueId: string | null;
-  remoteCwd: string;
-  workBranch: string | null;
-  setupCommand: string | null;
-}): DaytonaGitWorkspaceSpec {
-  const issueKey = input.issueId ?? "work";
-  const workBranch = sanitizeBranchPart(input.workBranch ?? `paperclip/daytona/${issueKey}`);
-  if (!workBranch) {
-    throw new Error("Daytona Git-clone workspace strategy requires a non-empty work branch.");
-  }
-  return {
-    repoUrl: input.repoUrl,
-    baseRef: input.baseRef ?? "main",
-    workBranch,
-    remoteCwd: input.remoteCwd,
-    setupCommand: input.setupCommand,
-  };
-}
-
-function createDaytonaRemoteGitRunner(input: {
-  sandbox: Sandbox;
-  timeoutSeconds: number;
-  startedAt: () => string;
-}): DaytonaGitWorkspaceRunner {
-  return {
-    execute: async (params) => {
-      const command = buildLoginShellScript({
-        command: params.command,
-        args: params.args ?? [],
-        cwd: params.cwd,
-        env: params.env,
-      });
-      const result = await input.sandbox.process.executeCommand(command, undefined, undefined, input.timeoutSeconds);
-      return {
-        exitCode: typeof result.exitCode === "number" ? result.exitCode : 1,
-        timedOut: false,
-        stdout: result.result ?? result.artifacts?.stdout ?? "",
-        stderr: "",
-      };
-    },
-  };
-}
-
-function requireCommandSuccess(result: DaytonaCommandResult, action: string): DaytonaCommandResult {
-  if (result.exitCode === 0 && !result.timedOut) return result;
-  const detail = result.stderr.trim() || result.stdout.trim();
-  throw new Error(`${action} failed with exit code ${result.exitCode ?? "null"}${detail ? `: ${detail}` : ""}`);
-}
-
-async function prepareDaytonaGitWorkspace(input: {
-  runner: DaytonaGitWorkspaceRunner;
-  spec: DaytonaGitWorkspaceSpec;
-  shellCommand: "bash" | "sh";
-  timeoutMs: number;
-}): Promise<{ spec: DaytonaGitWorkspaceSpec; baseCommit: string | null }> {
-  const runShell = async (script: string, cwd = "/") => {
-    return requireCommandSuccess(
-      await input.runner.execute({
-        command: input.shellCommand,
-        args: ["-lc", script],
-        cwd,
-        timeoutMs: input.timeoutMs,
-      }),
-      script,
-    );
-  };
-  const gitDir = `${input.spec.remoteCwd.replace(/\/+$/g, "")}/.git`;
-  await runShell(
-    [
-      `mkdir -p ${shellQuote(input.spec.remoteCwd.replace(/\/[^/]*$/g, "") || "/")}`,
-      `if [ -d ${shellQuote(gitDir)} ]; then`,
-      `  cd ${shellQuote(input.spec.remoteCwd)}`,
-      `  git remote set-url origin ${shellQuote(input.spec.repoUrl)}`,
-      "  git fetch origin --prune",
-      "else",
-      `  rm -rf ${shellQuote(input.spec.remoteCwd)}`,
-      `  git clone --no-checkout ${shellQuote(input.spec.repoUrl)} ${shellQuote(input.spec.remoteCwd)}`,
-      "fi",
-    ].join("\n"),
-  );
-  await runShell(
-    [
-      `git fetch origin ${shellQuote(input.spec.baseRef)}`,
-      `if git show-ref --verify --quiet refs/heads/${shellQuote(input.spec.workBranch)}; then`,
-      `  git checkout ${shellQuote(input.spec.workBranch)}`,
-      "else",
-      `  git checkout -B ${shellQuote(input.spec.workBranch)} FETCH_HEAD`,
-      "fi",
-    ].join("\n"),
-    input.spec.remoteCwd,
-  );
-  if (input.spec.setupCommand) {
-    await runShell(input.spec.setupCommand, input.spec.remoteCwd);
-  }
-  const baseCommitResult = await runShell("git rev-parse HEAD", input.spec.remoteCwd);
-  return {
-    spec: input.spec,
-    baseCommit: baseCommitResult.stdout.trim() || null,
-  };
 }
 
 async function ensureSandboxStarted(sandbox: Sandbox, timeoutSeconds: number): Promise<void> {
@@ -485,7 +314,7 @@ async function getSandbox(config: DaytonaDriverConfig, sandboxId: string): Promi
 async function getSandboxOrNull(config: DaytonaDriverConfig, sandboxId: string): Promise<Sandbox | null> {
   try {
     return await getSandbox(config, sandboxId);
-  } catch (error: unknown) {
+  } catch (error) {
     if (error instanceof DaytonaNotFoundError) {
       return null;
     }
@@ -540,12 +369,11 @@ async function executeOneShot(
     };
   } catch (error) {
     if (error instanceof DaytonaTimeoutError) {
-      const timeoutError = error as Error;
       return {
         exitCode: null,
         timedOut: true,
         stdout: "",
-        stderr: `${timeoutError.message.trim()}\n`,
+        stderr: `${error.message.trim()}\n`,
       };
     }
     throw error;
@@ -720,7 +548,7 @@ const plugin = definePlugin({
           console.warn(
             `Failed to stop Daytona sandbox during lease release: ${formatErrorMessage(error)}. Attempting delete instead.`,
           );
-          await sandbox.delete(toTimeoutSeconds(config.timeoutMs)).catch((deleteError: unknown) => {
+          await sandbox.delete(toTimeoutSeconds(config.timeoutMs)).catch((deleteError) => {
             console.warn(
               `Failed to delete Daytona sandbox after stop failure: ${formatErrorMessage(deleteError)}`,
             );
@@ -747,82 +575,23 @@ const plugin = definePlugin({
     params: PluginEnvironmentRealizeWorkspaceParams,
   ): Promise<PluginEnvironmentRealizeWorkspaceResult> {
     const config = parseDriverConfig(params.config);
-    const workspaceMetadata = asObject(params.workspace.metadata);
-    const workspaceSource = readWorkspaceRealizationSource(workspaceMetadata);
-    const request = readWorkspaceRealizationRequest(workspaceMetadata);
     const remoteCwd =
       typeof params.lease.metadata?.remoteCwd === "string" &&
       params.lease.metadata.remoteCwd.trim().length > 0
         ? params.lease.metadata.remoteCwd.trim()
         : params.workspace.remotePath ?? params.workspace.localPath ?? "/paperclip-workspace";
-    const workspaceStrategy = resolveWorkspaceStrategy(params, config);
 
-    if (!params.lease.providerLeaseId) {
-      if (workspaceStrategy === "git_clone") {
-        throw new Error("Daytona Git-clone workspace realization requires a provider lease ID.");
-      }
-      return {
-        cwd: remoteCwd,
-        metadata: {
-          provider: "daytona",
-          remoteCwd,
-          workspaceStrategy: "archive",
-        },
-      };
-    }
-
-    const sandbox = await getSandbox(config, params.lease.providerLeaseId);
-    await ensureSandboxStarted(sandbox, toTimeoutSeconds(config.timeoutMs));
-
-    if (workspaceStrategy !== "git_clone") {
+    if (params.lease.providerLeaseId) {
+      const sandbox = await getSandbox(config, params.lease.providerLeaseId);
+      await ensureSandboxStarted(sandbox, toTimeoutSeconds(config.timeoutMs));
       await sandbox.fs.createFolder(remoteCwd, "755");
-      return {
-        cwd: remoteCwd,
-        metadata: {
-          provider: "daytona",
-          remoteCwd,
-          workspaceStrategy: "archive",
-        },
-      };
     }
-
-    const repoUrl = readString(workspaceSource.repoUrl);
-    if (!repoUrl) {
-      throw new Error("Daytona Git-clone workspace strategy requires workspace repoUrl metadata.");
-    }
-
-    const spec = deriveDaytonaGitWorkspaceSpec({
-      repoUrl,
-      baseRef: readString(workspaceSource.repoRef) ?? readString(workspaceSource.defaultRef),
-      issueId: readString(request.issueId),
-      remoteCwd,
-      workBranch: readString(workspaceMetadata.remoteGitWorkBranch) ?? readString(workspaceMetadata.workBranch),
-      setupCommand: readString(asObject(request.runtimeOverlay).provisionCommand),
-    });
-    const runner = createDaytonaRemoteGitRunner({
-      sandbox,
-      timeoutSeconds: toTimeoutSeconds(config.timeoutMs),
-      startedAt: () => new Date().toISOString(),
-    });
-    const prepared = await prepareDaytonaGitWorkspace({
-      runner,
-      spec,
-      shellCommand: readString(params.lease.metadata?.shellCommand) === "sh" ? "sh" : "bash",
-      timeoutMs: config.timeoutMs,
-    });
 
     return {
-      cwd: prepared.spec.remoteCwd,
+      cwd: remoteCwd,
       metadata: {
         provider: "daytona",
-        remoteCwd: prepared.spec.remoteCwd,
-        workspaceStrategy: "git_clone",
-        repoUrl: prepared.spec.repoUrl,
-        baseRef: prepared.spec.baseRef,
-        workBranch: prepared.spec.workBranch,
-        baseCommit: prepared.baseCommit,
-        finalCommit: null,
-        pushedBranch: null,
+        remoteCwd,
       },
     };
   },

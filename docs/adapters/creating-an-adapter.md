@@ -255,7 +255,7 @@ The supported flow:
 - Finalize with `sandbox.finalize()`, which reads `git status`, commits dirty work when present, and pushes the work branch when enabled.
 - Wrap execution in `withRemoteGitSandbox()` when cleanup commands or provider cleanup hooks must run even after agent, commit, or push failures.
 
-This layer does not include Daytona or any other provider API. Provider-specific wrappers should pass a generic runner that can execute shell commands in the sandbox and cleanup hooks that stop or release the sandbox lease.
+This layer does not include provider API calls. Provider-specific wrappers should pass a generic runner that can execute shell commands in the sandbox and cleanup hooks that stop or release the sandbox lease.
 
 Credential and safety rules:
 

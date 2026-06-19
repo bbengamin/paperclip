@@ -506,7 +506,7 @@ const codexRemoteAdapter = createCodexRemoteAdapter({
 
 Remote adapter: codex_remote
 
-Use this adapter when Codex should run in a remote sandbox environment such as Daytona and the project workspace should be realized by cloning/fetching Git in the sandbox instead of uploading and downloading workspace archives.
+Use this adapter when Codex should run in a Cloudflare sandbox environment and the project workspace should be realized by cloning/fetching Git in the sandbox instead of uploading and downloading workspace archives.
 
 Runtime rules:
 - Paperclip is the only task-management system for this agent. Do not search for another task-management tool.
@@ -517,9 +517,9 @@ Runtime rules:
 - To finish, PATCH $PAPERCLIP_API_URL/api/issues/$PAPERCLIP_TASK_ID with {"status":"done","comment":"..."}.
 
 Required operator setup:
-- select a sandbox environment for the agent, usually a Daytona environment
+- select a Cloudflare sandbox environment for the agent
 - ensure that environment can access the configured project repoUrl
-- configure Daytona with workspaceStrategy: "git_clone" or rely on this adapter's workspace realization hint
+- rely on this adapter's workspace realization hint so the sandbox run uses Git clone/fetch instead of archive sync
 
 Use codex_local for local or SSH execution where Paperclip should use the existing local/remote filesystem workflow.
 `,

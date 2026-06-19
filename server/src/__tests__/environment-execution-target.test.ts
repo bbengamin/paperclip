@@ -137,7 +137,7 @@ describe("resolveEnvironmentExecutionTarget", () => {
     mockResolveEnvironmentDriverConfigForRuntime.mockResolvedValue({
       driver: "sandbox",
       config: {
-        provider: "daytona",
+        provider: "cloudflare",
         reuseLease: false,
         timeoutMs: 30_000,
       },
@@ -148,13 +148,13 @@ describe("resolveEnvironmentExecutionTarget", () => {
       companyId: "company-1",
       adapterType: "codex_remote",
       environment: {
-        id: "env-daytona-1",
+        id: "env-cloudflare-1",
         driver: "sandbox",
         config: {
-          provider: "daytona",
+          provider: "cloudflare",
         },
       },
-      leaseId: "lease-daytona-1",
+      leaseId: "lease-cloudflare-1",
       leaseMetadata: {
         remoteCwd: "/workspaces/paperclip",
         shellCommand: "bash",
@@ -166,10 +166,10 @@ describe("resolveEnvironmentExecutionTarget", () => {
     expect(target).toMatchObject({
       kind: "remote",
       transport: "sandbox",
-      providerKey: "daytona",
+      providerKey: "cloudflare",
       remoteCwd: "/workspaces/paperclip",
-      leaseId: "lease-daytona-1",
-      environmentId: "env-daytona-1",
+      leaseId: "lease-cloudflare-1",
+      environmentId: "env-cloudflare-1",
       shellCommand: "bash",
       timeoutMs: 30_000,
     });

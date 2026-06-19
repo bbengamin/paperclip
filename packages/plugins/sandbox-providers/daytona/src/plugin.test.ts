@@ -109,7 +109,6 @@ describe("Daytona sandbox provider plugin", () => {
         autoArchiveInterval: 60,
         autoDeleteInterval: -1,
         reuseLease: true,
-        workspaceStrategy: null,
       },
     });
   });
@@ -496,102 +495,5 @@ describe("Daytona sandbox provider plugin", () => {
       stdout: "",
       stderr: "command timed out\n",
     });
-  });
-
-  it("realizes a Git-clone workspace without archive sync", async () => {
-    process.env.DAYTONA_API_KEY = "host-key";
-    const sandbox = createMockSandbox();
-    sandbox.process.executeCommand.mockImplementation(async (command: string) => ({
-      exitCode: 0,
-      result: command.includes("git rev-parse HEAD") ? "base-sha\n" : "",
-      artifacts: { stdout: command.includes("git rev-parse HEAD") ? "base-sha\n" : "" },
-    }));
-    mockGet.mockResolvedValue(sandbox);
-
-    const result = await plugin.definition.onEnvironmentRealizeWorkspace?.({
-      driverKey: "daytona",
-      companyId: "company-1",
-      environmentId: "env-1",
-      config: {
-        timeoutMs: 300000,
-        workspaceStrategy: "git_clone",
-      },
-      lease: {
-        providerLeaseId: "sandbox-123",
-        metadata: {
-          remoteCwd: "/home/daytona/paperclip-workspace",
-          shellCommand: "bash",
-        },
-      },
-      workspace: {
-        remotePath: "/home/daytona/paperclip-workspace",
-        metadata: {
-          workspaceRealizationRequest: {
-            issueId: "issue-202",
-            source: {
-              repoUrl: "https://github.com/example/repo",
-              repoRef: "main",
-              projectWorkspaceId: "workspace-1",
-            },
-            runtimeOverlay: {
-              provisionCommand: "pnpm install",
-            },
-          },
-        },
-      },
-    });
-
-    const commands = sandbox.process.executeCommand.mock.calls.map((call) => String(call[0])).join("\n");
-    expect(sandbox.fs.createFolder).not.toHaveBeenCalledWith("/home/daytona/paperclip-workspace", "755");
-    expect(commands).toContain("git clone --no-checkout");
-    expect(commands).toContain("git fetch origin");
-    expect(commands).toContain("pnpm install");
-    expect(commands).not.toMatch(/\btar\b|base64|workspace-upload|workspace-download/);
-    expect(result).toEqual({
-      cwd: "/home/daytona/paperclip-workspace",
-      metadata: {
-        provider: "daytona",
-        remoteCwd: "/home/daytona/paperclip-workspace",
-        workspaceStrategy: "git_clone",
-        repoUrl: "https://github.com/example/repo",
-        baseRef: "main",
-        workBranch: "paperclip/daytona/issue-202",
-        baseCommit: "base-sha",
-        finalCommit: null,
-        pushedBranch: null,
-      },
-    });
-  });
-
-  it("fails Git-clone workspace realization clearly when repo metadata is missing", async () => {
-    process.env.DAYTONA_API_KEY = "host-key";
-    const sandbox = createMockSandbox();
-    mockGet.mockResolvedValue(sandbox);
-
-    await expect(plugin.definition.onEnvironmentRealizeWorkspace?.({
-      driverKey: "daytona",
-      companyId: "company-1",
-      environmentId: "env-1",
-      config: {
-        timeoutMs: 300000,
-        workspaceStrategy: "git_clone",
-      },
-      lease: {
-        providerLeaseId: "sandbox-123",
-        metadata: {
-          remoteCwd: "/home/daytona/paperclip-workspace",
-        },
-      },
-      workspace: {
-        metadata: {
-          workspaceRealizationRequest: {
-            issueId: "issue-202",
-            source: {},
-          },
-        },
-      },
-    })).rejects.toThrow("requires workspace repoUrl metadata");
-
-    expect(sandbox.process.executeCommand).not.toHaveBeenCalled();
   });
 });

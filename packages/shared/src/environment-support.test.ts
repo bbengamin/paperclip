@@ -23,7 +23,7 @@ describe("isSandboxProviderSupportedForAdapter", () => {
 
   it("accepts additional sandbox providers for codex_remote", () => {
     expect(
-      isSandboxProviderSupportedForAdapter("codex_remote", "daytona", ["daytona"]),
+      isSandboxProviderSupportedForAdapter("codex_remote", "cloudflare", ["cloudflare"]),
     ).toBe(true);
   });
 

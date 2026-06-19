@@ -84,10 +84,10 @@ function createContext(input: {
     executionTarget: {
       kind: "remote",
       transport: "sandbox",
-      providerKey: "daytona",
+      providerKey: "cloudflare",
       environmentId: "env-1",
       leaseId: "lease-1",
-      remoteCwd: "/home/daytona/paperclip-workspace",
+      remoteCwd: "/workspace/paperclip",
       shellCommand: "bash",
       runner,
     },
@@ -173,14 +173,14 @@ describe("codex_remote wrapper", () => {
       },
       remoteGitSandbox: {
         enabled: true,
-        workBranch: "paperclip/daytona/RL-201",
-        remoteCwd: "/home/daytona/paperclip-workspace",
+        workBranch: "paperclip/cloudflare/RL-201",
+        remoteCwd: "/workspace/paperclip",
       },
     });
     expect(delegatedCtx?.executionTarget).toMatchObject({
       kind: "remote",
       transport: "sandbox",
-      remoteCwd: "/home/daytona/paperclip-workspace",
+      remoteCwd: "/workspace/paperclip",
     });
     expect(result.resultJson).toMatchObject({
       codex: "ok",
@@ -188,13 +188,13 @@ describe("codex_remote wrapper", () => {
         dirty: true,
         commitSha: "abc123",
         pushed: true,
-        pushedBranch: "paperclip/daytona/RL-201",
+        pushedBranch: "paperclip/cloudflare/RL-201",
         pullRequestSkippedReason: "missing_github_repo_credential",
       },
     });
     expect(ctx.runnerScripts.join("\n")).toContain("git clone --no-checkout");
-    expect(ctx.runnerScripts.join("\n")).toContain("git checkout -B 'paperclip/daytona/RL-201' FETCH_HEAD");
-    expect(ctx.runnerScripts.join("\n")).toContain("git push origin HEAD:refs/heads/'paperclip/daytona/RL-201'");
+    expect(ctx.runnerScripts.join("\n")).toContain("git checkout -B 'paperclip/cloudflare/RL-201' FETCH_HEAD");
+    expect(ctx.runnerScripts.join("\n")).toContain("git push origin HEAD:refs/heads/'paperclip/cloudflare/RL-201'");
     expect(ctx.runnerScripts.join("\n")).not.toMatch(/\btar\b|base64|workspace-upload|workspace-download/);
   });
 
@@ -327,7 +327,7 @@ describe("codex_remote wrapper", () => {
     const patchBody = JSON.parse(String((patchCall?.[1] as RequestInit | undefined)?.body));
     expect(patchBody).toMatchObject({ status: "done" });
     expect(patchBody.comment).toContain("https://github.com/example/repo/pull/42");
-    expect(patchBody.comment).toContain("paperclip/daytona/RL-201");
+    expect(patchBody.comment).toContain("paperclip/cloudflare/RL-201");
     expect(result.resultJson).toMatchObject({
       remoteGit: {
         paperclipCloseout: {

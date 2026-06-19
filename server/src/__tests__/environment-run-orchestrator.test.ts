@@ -426,7 +426,7 @@ describe("environmentRunOrchestrator — realizeForRun", () => {
     mockResolveEnvironmentExecutionTarget.mockResolvedValue({
       kind: "remote",
       transport: "sandbox",
-      providerKey: "daytona",
+      providerKey: "cloudflare",
       remoteCwd: "/remote/workspace",
       environmentId: "env-1",
       leaseId: "lease-1",
@@ -440,7 +440,7 @@ describe("environmentRunOrchestrator — realizeForRun", () => {
       adapterConfig: {
         workspaceRealization: {
           workspaceStrategy: "git_clone",
-          workBranch: "paperclip/daytona/RL-203",
+          workBranch: "paperclip/cloudflare/RL-203",
         },
       },
     }));
@@ -449,8 +449,8 @@ describe("environmentRunOrchestrator — realizeForRun", () => {
       workspace: expect.objectContaining({
         metadata: expect.objectContaining({
           workspaceStrategy: "git_clone",
-          workBranch: "paperclip/daytona/RL-203",
-          remoteGitWorkBranch: "paperclip/daytona/RL-203",
+          workBranch: "paperclip/cloudflare/RL-203",
+          remoteGitWorkBranch: "paperclip/cloudflare/RL-203",
           workspaceRealizationRequest: expect.any(Object),
         }),
       }),

@@ -362,7 +362,7 @@ export async function executeCodexRemote(input: {
     remoteRootDir: readString(remoteGit.remoteRootDir) ?? (target.remoteCwd.replace(/\/+[^/]*$/, "") || "/workspaces"),
     remoteCwd: readString(workspaceRealization.remoteCwd) ?? readString(remoteGit.remoteCwd) ?? target.remoteCwd,
     workBranch: readString(workspaceRealization.workBranch) ?? readString(remoteGit.workBranch),
-    workBranchPrefix: readString(remoteGit.workBranchPrefix) ?? "paperclip/daytona",
+    workBranchPrefix: readString(remoteGit.workBranchPrefix) ?? "paperclip/cloudflare",
   });
 
   let sandbox: Awaited<ReturnType<typeof prepareRemoteGitSandbox>>;
