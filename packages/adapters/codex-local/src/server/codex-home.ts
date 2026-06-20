@@ -24,6 +24,8 @@ const REMOTE_KEPT_TOP_LEVEL_KEYS = new Set([
   "model_supports_reasoning_summaries",
   "approval_policy",
   "preferred_auth_method",
+  "check_for_update_on_startup",
+  "web_search",
   "personality",
 ]);
 // Kept sections: only the model provider definitions (e.g.
@@ -35,6 +37,15 @@ function parseTomlSectionSegments(line: string): string[] | null {
   const match = /^\s*\[\[?\s*([^\]]+?)\s*\]\]?\s*$/.exec(line);
   if (!match) return null;
   return match[1]!.split(".").map((segment) => segment.trim().replace(/^['"]|['"]$/g, ""));
+}
+
+function parseTomlStringValue(line: string): string | null {
+  const match = /^\s*[A-Za-z0-9_-]+\s*=\s*(['"])(.*?)\1\s*(?:#.*)?$/.exec(line);
+  return match?.[2] ?? null;
+}
+
+function tomlString(value: string): string {
+  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 
 /**
@@ -53,48 +64,82 @@ function parseTomlSectionSegments(line: string): string[] | null {
  */
 export function sanitizeRemoteCodexConfigToml(toml: string): string {
   const lines = toml.split(/\r?\n/);
-  const out: string[] = [];
+  const preamble = new Map<string, string>();
+  const sections: Array<{ header: string; segments: string[]; lines: string[] }> = [];
+  const providerNames: string[] = [];
+  let configuredProvider: string | null = null;
   let inPreamble = true;
-  let inKeptSection = false;
-  // Tracks an open `[model_providers.<name>]` table (not a sub-table) so we can
-  // append `supports_websockets = false` if it was not already specified.
-  let inProviderMainSection = false;
-  let providerHasWebsocketsFlag = false;
-
-  const closeProviderSection = () => {
-    if (inProviderMainSection && !providerHasWebsocketsFlag) {
-      out.push("supports_websockets = false");
-    }
-    inProviderMainSection = false;
-    providerHasWebsocketsFlag = false;
-  };
+  let currentSection: { header: string; segments: string[]; lines: string[] } | null = null;
 
   for (const line of lines) {
     const segments = parseTomlSectionSegments(line);
     if (segments) {
-      closeProviderSection();
       inPreamble = false;
-      inKeptSection = segments[0]?.toLowerCase() === REMOTE_KEPT_SECTION_ROOT;
-      inProviderMainSection = inKeptSection && segments.length === 2;
-      if (inKeptSection) out.push(line);
+      currentSection = null;
+      if (segments[0]?.toLowerCase() === REMOTE_KEPT_SECTION_ROOT) {
+        currentSection = { header: line, segments, lines: [] };
+        sections.push(currentSection);
+        if (segments.length === 2 && segments[1]) {
+          providerNames.push(segments[1]);
+        }
+      }
       continue;
     }
     if (inPreamble) {
       const key = /^\s*([A-Za-z0-9_-]+)\s*=/.exec(line);
       if (key && REMOTE_KEPT_TOP_LEVEL_KEYS.has(key[1]!.toLowerCase())) {
-        out.push(line);
+        const normalizedKey = key[1]!.toLowerCase();
+        preamble.set(normalizedKey, line);
+        if (normalizedKey === "model_provider") {
+          configuredProvider = parseTomlStringValue(line);
+        }
       }
       continue;
     }
-    if (inKeptSection) {
+    if (currentSection) {
+      currentSection.lines.push(line);
+    }
+  }
+
+  const activeProvider =
+    configuredProvider && configuredProvider.toLowerCase() !== "openai" && providerNames.includes(configuredProvider)
+      ? configuredProvider
+      : providerNames.find((provider) => provider.toLowerCase() !== "openai") ?? configuredProvider ?? providerNames[0] ?? null;
+
+  if (activeProvider) {
+    preamble.set("model_provider", `model_provider = ${tomlString(activeProvider)}`);
+  }
+  preamble.set("preferred_auth_method", 'preferred_auth_method = "apikey"');
+  preamble.set("check_for_update_on_startup", "check_for_update_on_startup = false");
+  preamble.set("web_search", 'web_search = "disabled"');
+
+  const out: string[] = [...preamble.values()];
+  for (const section of sections) {
+    if (out.length > 0 && out[out.length - 1] !== "") out.push("");
+    out.push(section.header);
+    const isProviderMainSection = section.segments.length === 2;
+    for (const line of section.lines) {
       const key = /^\s*([A-Za-z0-9_-]+)\s*=/.exec(line);
-      if (key && key[1]!.toLowerCase() === "supports_websockets") {
-        providerHasWebsocketsFlag = true;
+      if (
+        isProviderMainSection &&
+        key &&
+        ["requires_openai_auth", "supports_websockets"].includes(key[1]!.toLowerCase())
+      ) {
+        continue;
       }
       out.push(line);
     }
+    if (isProviderMainSection) {
+      out.push("requires_openai_auth = false");
+      out.push("supports_websockets = false");
+    }
   }
-  closeProviderSection();
+  if (out.length > 0 && out[out.length - 1] !== "") out.push("");
+  out.push("[features]");
+  out.push("browser_use = false");
+  out.push("in_app_browser = false");
+  out.push("computer_use = false");
+
   return out.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd() + "\n";
 }
 

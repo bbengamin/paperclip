@@ -12,6 +12,9 @@ describe("sanitizeRemoteCodexConfigToml", () => {
       'model_provider = "cliproxyapi"',
       'model_reasoning_effort = "medium"',
       'personality = "pragmatic"',
+      'preferred_auth_method = "chatgpt"',
+      "check_for_update_on_startup = true",
+      'web_search = "cached"',
       "",
       "[marketplaces.openai-bundled]",
       'source = "local"',
@@ -29,7 +32,8 @@ describe("sanitizeRemoteCodexConfigToml", () => {
       'base_url = "http://100.114.28.103:8317/v1"',
       'experimental_bearer_token = "secret"',
       'wire_api = "responses"',
-      "requires_openai_auth = false",
+      "requires_openai_auth = true",
+      "supports_websockets = true",
       "",
       "[mcp_servers.node_repl]",
       'command = "C:\\\\node_repl.exe"',
@@ -42,11 +46,20 @@ describe("sanitizeRemoteCodexConfigToml", () => {
     expect(out).toContain('model = "gpt-5.5"');
     expect(out).toContain('model_provider = "cliproxyapi"');
     expect(out).toContain('model_reasoning_effort = "medium"');
+    expect(out).toContain('preferred_auth_method = "apikey"');
+    expect(out).toContain("check_for_update_on_startup = false");
+    expect(out).toContain('web_search = "disabled"');
     expect(out).toContain("[model_providers.cliproxyapi]");
     expect(out).toContain("experimental_bearer_token");
     expect(out).toContain("requires_openai_auth = false");
     // Force HTTP transport so the sandbox doesn't burn ~75s retrying wss://.
     expect(out).toContain("supports_websockets = false");
+    expect(out).toContain("[features]");
+    expect(out).toContain("browser_use = false");
+    expect(out).toContain("in_app_browser = false");
+    expect(out).toContain("computer_use = false");
+    expect(out).not.toContain("requires_openai_auth = true");
+    expect(out).not.toContain("supports_websockets = true");
 
     // Everything host-specific: dropped.
     expect(out).not.toContain("windows_wsl_setup_acknowledged");
@@ -59,19 +72,29 @@ describe("sanitizeRemoteCodexConfigToml", () => {
     expect(out).not.toContain("[plugins");
   });
 
-  it("keeps an explicit supports_websockets value instead of injecting", () => {
+  it("forces sandbox startup flags onto the active non-openai provider", () => {
     const toml = [
-      'model_provider = "cliproxyapi"',
+      'model_provider = "openai"',
+      "",
+      "[model_providers.openai]",
+      'base_url = "https://api.openai.com/v1"',
+      "supports_websockets = true",
       "",
       "[model_providers.cliproxyapi]",
       'base_url = "http://x/v1"',
+      "requires_openai_auth = true",
       "supports_websockets = true",
     ].join("\n");
 
     const out = sanitizeRemoteCodexConfigToml(toml);
 
-    expect(out).toContain("supports_websockets = true");
-    expect(out).not.toContain("supports_websockets = false");
+    expect(out).toContain('model_provider = "cliproxyapi"');
+    expect(out).toContain("[model_providers.cliproxyapi]");
+    expect(out).toContain("requires_openai_auth = false");
+    expect(out).toContain("supports_websockets = false");
+    expect(out).not.toContain('model_provider = "openai"');
+    expect(out).not.toContain("requires_openai_auth = true");
+    expect(out).not.toContain("supports_websockets = true");
   });
 });
 
@@ -98,6 +121,16 @@ describe("prepareRemoteCodexHomeAsset", () => {
       await expect(fs.readFile(path.join(asset.dir, "config.toml"), "utf8")).resolves.toContain(
         "[model_providers.cliproxyapi]",
       );
+      const config = await fs.readFile(path.join(asset.dir, "config.toml"), "utf8");
+      expect(config).toContain('preferred_auth_method = "apikey"');
+      expect(config).toContain("check_for_update_on_startup = false");
+      expect(config).toContain('web_search = "disabled"');
+      expect(config).toContain("requires_openai_auth = false");
+      expect(config).toContain("supports_websockets = false");
+      expect(config).toContain("[features]");
+      expect(config).toContain("browser_use = false");
+      expect(config).toContain("in_app_browser = false");
+      expect(config).toContain("computer_use = false");
     } finally {
       await asset.cleanup();
       await fs.rm(root, { recursive: true, force: true });
