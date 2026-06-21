@@ -613,6 +613,27 @@ async function writeBridgeResponse(
   await client.rename(tempPath, responsePath);
 }
 
+// ---------------------------------------------------------------------------
+// SSE / stream-discovery transport — INTENTIONAL SCAFFOLDING, NOT YET WIRED.
+//
+// Status: this block (watcher source + the optional `streamDiscovery` path on
+// startSandboxCallbackBridgeWorker) is a committed-but-default-off foundation
+// for replacing the ~100ms listJsonFiles poll with a single long-lived stream
+// that pushes new request file names. It is exercised only by unit tests; no
+// production caller passes `streamDiscovery`, so the live bridge still polls.
+// It is deliberately retained (not dead code) to be finished soon.
+//
+// To finish it (see doc/plans/2026-06-21-sse-bridge-transport.md):
+//   1. Add a `streamDiscovery` implementation in @paperclipai/adapter-utils
+//      execution-target that uploads this watcher and runs it as a STREAMING
+//      exec on the dedicated bridge session, parsing RS-framed base64 file
+//      names into onFileName.
+//   2. Add a Cloudflare plugin "bridge_stream" channel = bridge session +
+//      streaming (today bridge-channel execs are forced non-streaming).
+//   3. Gate selection behind PAPERCLIP_BRIDGE_TRANSPORT=sse (default "poll").
+//   4. Validate on a live sandbox run (the only unproven bit is whether a
+//      streaming exec on the *bridge session* delivers stdout to the host).
+// ---------------------------------------------------------------------------
 export const SANDBOX_CALLBACK_BRIDGE_WATCHER_ENTRYPOINT = "paperclip-bridge-watcher.mjs";
 // Record-separator framing marker for watcher → host stdout. The host ignores
 // any stdout that does not start with this byte (login-shell banners, etc.).
