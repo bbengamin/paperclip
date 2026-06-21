@@ -1,10 +1,22 @@
+import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { AdapterExecutionContext, ServerAdapterModule } from "@paperclipai/adapter-utils";
+import { resolvePaperclipInstanceRootForAdapter } from "@paperclipai/adapter-utils/server-utils";
 import {
   createWrappedCodexLocalAdapter,
+  neutralizeCodexLocalIsolationGuard,
   patchCodexLocalExecutionContext,
   resolveCodexPaperclipRuntimeState,
 } from "./codex-local.js";
+
+function guardAutoHome(companyId: string, agentId: string): string {
+  const instanceRoot = resolvePaperclipInstanceRootForAdapter({
+    homeDir: process.env.PAPERCLIP_HOME?.trim() || undefined,
+    instanceId: process.env.PAPERCLIP_INSTANCE_ID?.trim() || undefined,
+    env: process.env,
+  });
+  return path.resolve(instanceRoot, "companies", companyId, "agents", agentId, "codex-home");
+}
 
 function createContext(overrides: Partial<AdapterExecutionContext> = {}): AdapterExecutionContext {
   return {
@@ -134,5 +146,43 @@ describe("codex_local Paperclip runtime wrapper", () => {
 
     expect(patched.config.paperclipRuntimeStateStrategy).toBe("managed");
     expect(patched.config.paperclipRuntimeStateReason).toContain("explicitly requested");
+  });
+});
+
+describe("neutralizeCodexLocalIsolationGuard", () => {
+  it("strips the empty OPENAI_API_KEY and the auto-isolated CODEX_HOME the upstream guard injects on save", () => {
+    const ctx = createContext({
+      config: {
+        env: {
+          OPENAI_API_KEY: "",
+          CODEX_HOME: guardAutoHome("company-1", "agent-1"),
+          KEEP_ME: "value",
+        },
+      },
+    });
+    const out = neutralizeCodexLocalIsolationGuard(ctx);
+    const env = (out.config as { env: Record<string, unknown> }).env;
+    expect(env).not.toHaveProperty("OPENAI_API_KEY");
+    expect(env).not.toHaveProperty("CODEX_HOME");
+    expect(env.KEEP_ME).toBe("value");
+  });
+
+  it("leaves a real OPENAI_API_KEY and a user-set CODEX_HOME untouched", () => {
+    const ctx = createContext({
+      config: { env: { OPENAI_API_KEY: "sk-real", CODEX_HOME: "/custom/codex-home" } },
+    });
+    const out = neutralizeCodexLocalIsolationGuard(ctx);
+    const env = (out.config as { env: Record<string, unknown> }).env;
+    expect(env.OPENAI_API_KEY).toBe("sk-real");
+    expect(env.CODEX_HOME).toBe("/custom/codex-home");
+  });
+
+  it("also unwraps the plain-binding form of an empty OPENAI_API_KEY", () => {
+    const ctx = createContext({
+      config: { env: { OPENAI_API_KEY: { type: "plain", value: "" } } },
+    });
+    const out = neutralizeCodexLocalIsolationGuard(ctx);
+    const env = (out.config as { env: Record<string, unknown> }).env;
+    expect(env).not.toHaveProperty("OPENAI_API_KEY");
   });
 });
