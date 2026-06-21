@@ -79,6 +79,21 @@ describe("shouldSilenceHttpSuccessLog", () => {
     expect(shouldSilenceHttpSuccessLog("GET", "/companies/abc/live-runs", 200)).toBe(true);
   });
 
+  it("silences the routine bridge liveness-ping POST but not other POSTs", () => {
+    expect(
+      shouldSilenceHttpSuccessLog("POST", "/heartbeat-runs/0ded26df-7036-4fc6-a1de-1bd69ac60601/activity", 200),
+    ).toBe(true);
+    expect(
+      shouldSilenceHttpSuccessLog("POST", "/api/heartbeat-runs/0ded26df-7036-4fc6-a1de-1bd69ac60601/activity", 200),
+    ).toBe(true);
+    // A failing ping must still surface.
+    expect(
+      shouldSilenceHttpSuccessLog("POST", "/heartbeat-runs/0ded26df/activity", 503),
+    ).toBe(false);
+    // Unrelated POSTs are still logged.
+    expect(shouldSilenceHttpSuccessLog("POST", "/api/issues/PAP-1383/comments", 200)).toBe(false);
+  });
+
   it("keeps normal successful application requests", () => {
     expect(shouldSilenceHttpSuccessLog("GET", "/api/issues/PAP-1383", 200)).toBe(false);
     expect(shouldSilenceHttpSuccessLog("PATCH", "/api/issues/PAP-1383", 200)).toBe(false);

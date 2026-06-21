@@ -38,6 +38,13 @@ const SILENCED_SUCCESS_STATIC_PATHS = new Set([
   "/sw.js",
 ]);
 
+// Routine non-GET endpoints that fire on a timer and should not be logged on
+// success. The sandbox callback bridge POSTs a liveness "run alive" ping to the
+// heartbeat-runs activity endpoint every ~30s per run.
+const SILENCED_SUCCESS_POST_PATHS = [
+  /^(?:\/api)?\/heartbeat-runs\/[^/]+\/activity$/,
+];
+
 function normalizePath(url: string): string {
   const trimmed = url.trim();
   if (trimmed.length === 0) return "/";
@@ -49,9 +56,12 @@ export function shouldSilenceHttpSuccessLog(method: string | undefined, url: str
   if (statusCode >= 400) return false;
   if (statusCode === 304) return true;
   if (!method || !url) return false;
-  if (!SILENCED_SUCCESS_METHODS.has(method.toUpperCase())) return false;
 
   const pathname = normalizePath(url);
+  if (method.toUpperCase() === "POST" && SILENCED_SUCCESS_POST_PATHS.some((pattern) => pattern.test(pathname))) {
+    return true;
+  }
+  if (!SILENCED_SUCCESS_METHODS.has(method.toUpperCase())) return false;
   if (SILENCED_SUCCESS_STATIC_PATHS.has(pathname)) return true;
   if (SILENCED_SUCCESS_STATIC_PREFIXES.some((prefix) => pathname.startsWith(prefix))) return true;
   return SILENCED_SUCCESS_API_PATHS.some((pattern) => pattern.test(pathname));

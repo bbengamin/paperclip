@@ -142,7 +142,11 @@ function logCloudflareExecChunk(
     if (stream === "stderr") {
       logger.warn(`${CLOUDFLARE_EXEC_STDERR_PREFIX} ${line}`);
     } else {
-      logger.info(`${CLOUDFLARE_EXEC_STDOUT_PREFIX} ${line}`);
+      // Per-line exec stdout (e.g. every Codex JSONL event) is the single
+      // largest source of console noise during a run, and it is already
+      // forwarded verbatim to the run log via the stream channel below. Keep it
+      // only at debug so the info-level console stays a readable lifecycle view.
+      logger.debug(`${CLOUDFLARE_EXEC_STDOUT_PREFIX} ${line}`);
     }
   }
 }
