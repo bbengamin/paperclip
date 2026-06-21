@@ -613,6 +613,81 @@ async function writeBridgeResponse(
   await client.rename(tempPath, responsePath);
 }
 
+export const SANDBOX_CALLBACK_BRIDGE_WATCHER_ENTRYPOINT = "paperclip-bridge-watcher.mjs";
+// Record-separator framing marker for watcher → host stdout. The host ignores
+// any stdout that does not start with this byte (login-shell banners, etc.).
+export const SANDBOX_CALLBACK_BRIDGE_STREAM_FRAME_PREFIX = "";
+
+/**
+ * Stream-based request discovery for the callback bridge worker. When provided,
+ * the worker stops polling `listJsonFiles` over the provider RPC (one RPC every
+ * ~100ms) and instead relies on a single long-lived stream that pushes the
+ * basename of each new request file as it appears. The worker still reads,
+ * forwards, and removes each request through the queue client, so the request
+ * handling path is identical to poll mode — only discovery changes.
+ *
+ * Implementations must guarantee at-most-once delivery per file name for the
+ * stream's lifetime; the worker additionally de-dupes by name defensively.
+ */
+export interface SandboxCallbackBridgeStreamDiscovery {
+  start(handlers: {
+    onFileName: (fileName: string) => void;
+    onError: (error: unknown) => void;
+  }): Promise<{ stop: () => Promise<void> }>;
+}
+
+export function getSandboxCallbackBridgeWatcherSource(): string {
+  return `import { promises as fs } from "node:fs";
+import path from "node:path";
+
+const requestsDir = process.argv[2];
+const pidFile = process.argv[3] || "";
+const pollMs = Number(process.argv[4] || "150");
+const FRAME = ${JSON.stringify(SANDBOX_CALLBACK_BRIDGE_STREAM_FRAME_PREFIX)};
+
+if (!requestsDir) {
+  console.error("paperclip bridge watcher requires a requests dir argument");
+  process.exit(1);
+}
+
+let running = true;
+const stop = () => { running = false; };
+process.on("SIGTERM", stop);
+process.on("SIGINT", stop);
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+await fs.mkdir(requestsDir, { recursive: true });
+if (pidFile) {
+  try { await fs.writeFile(pidFile, String(process.pid)); } catch {}
+}
+
+// Emit each new *.json basename exactly once. We deliberately do NOT unlink the
+// file here: the host reads + forwards + removes it through the queue client,
+// matching poll-mode semantics. The 'emitted' set is pruned as files disappear
+// so it stays bounded.
+const emitted = new Set();
+while (running) {
+  let files = [];
+  try {
+    files = (await fs.readdir(requestsDir)).filter((name) => name.endsWith(".json"));
+  } catch {
+    files = [];
+  }
+  const present = new Set(files);
+  for (const name of files.sort()) {
+    if (emitted.has(name)) continue;
+    emitted.add(name);
+    process.stdout.write(FRAME + Buffer.from(name, "utf8").toString("base64") + "\\n");
+  }
+  for (const name of [...emitted]) {
+    if (!present.has(name)) emitted.delete(name);
+  }
+  await sleep(pollMs);
+}
+`;
+}
+
 export async function startSandboxCallbackBridgeWorker(input: {
   client: SandboxCallbackBridgeQueueClient;
   queueDir: string;
@@ -624,6 +699,8 @@ export async function startSandboxCallbackBridgeWorker(input: {
     body?: string;
   }>;
   maxBodyBytes?: number | null;
+  /** Opt-in SSE/stream discovery; when set the poll loop is not used. */
+  streamDiscovery?: SandboxCallbackBridgeStreamDiscovery | null;
 }): Promise<SandboxCallbackBridgeWorkerHandle> {
   const pollIntervalMs = normalizeTimeoutMs(input.pollIntervalMs, DEFAULT_BRIDGE_POLL_INTERVAL_MS);
   const maxBodyBytes = normalizeTimeoutMs(input.maxBodyBytes, DEFAULT_BRIDGE_MAX_BODY_BYTES);
@@ -637,6 +714,10 @@ export async function startSandboxCallbackBridgeWorker(input: {
   let inFlight = 0;
   let settled = false;
   let stopDeadline = Number.POSITIVE_INFINITY;
+  // Stream (SSE) discovery handles: resolve the stream-mode loop and stop the
+  // underlying discovery stream when the worker is stopped.
+  let onStopResolve: (() => void) | null = null;
+  let streamStop: (() => Promise<void>) | null = null;
   let settleResolve: (() => void) | null = null;
   const settledPromise = new Promise<void>((resolve) => {
     settleResolve = resolve;
@@ -765,6 +846,40 @@ export async function startSandboxCallbackBridgeWorker(input: {
   const loop = (async () => {
     let consecutivePollErrors = 0;
     try {
+      if (input.streamDiscovery) {
+        // SSE/stream mode: a single long-lived stream pushes new request file
+        // names instead of the host polling listJsonFiles over the provider RPC.
+        // Request handling (read → forward → respond → remove) is identical to
+        // poll mode via processRequestFile; we only changed discovery.
+        const seen = new Set<string>();
+        const handle = await input.streamDiscovery.start({
+          onFileName: (fileName) => {
+            if (stopping || seen.has(fileName)) return;
+            seen.add(fileName);
+            inFlight += 1;
+            void processRequestFile(fileName)
+              .catch((error) => {
+                console.warn(
+                  `[paperclip] sandbox callback bridge processing failed for ${fileName} (will retry): ${error instanceof Error ? error.message : String(error)}`,
+                );
+              })
+              .finally(() => {
+                inFlight -= 1;
+                seen.delete(fileName);
+              });
+          },
+          onError: (error) => {
+            console.warn(
+              `[paperclip] sandbox callback bridge stream discovery error: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          },
+        });
+        streamStop = handle.stop;
+        // Keep the worker alive until stop() releases this promise.
+        await new Promise<void>((resolve) => {
+          onStopResolve = resolve;
+        });
+      } else {
       while (true) {
         let fileNames: string[];
         try {
@@ -814,6 +929,7 @@ export async function startSandboxCallbackBridgeWorker(input: {
           break;
         }
       }
+      }
     } catch (error) {
       const message = buildWorkerFailureMessage(error);
       console.warn(`[paperclip] ${message}`);
@@ -839,6 +955,15 @@ export async function startSandboxCallbackBridgeWorker(input: {
       stopping = true;
       const drainMs = normalizeTimeoutMs(options.drainTimeoutMs, DEFAULT_BRIDGE_STOP_TIMEOUT_MS);
       stopDeadline = Date.now() + drainMs;
+      // Stream mode: stop the discovery stream and release the stream-mode loop
+      // so the worker can settle and abort any pending requests below.
+      if (streamStop) {
+        await streamStop().catch(() => undefined);
+      }
+      if (onStopResolve) {
+        onStopResolve();
+        onStopResolve = null;
+      }
       if (!settled) {
         await Promise.race([
           settledPromise,

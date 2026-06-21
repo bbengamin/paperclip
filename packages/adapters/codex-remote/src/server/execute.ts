@@ -1112,7 +1112,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         : [...commandNotes, execArgs.fastModeIgnoredReason];
     if (onMeta) {
       await onMeta({
-        adapterType: "codex_local",
+        adapterType: "codex_remote",
         command: resolvedCommand,
         cwd: effectiveExecutionCwd,
         commandNotes: commandNotesWithFastMode,

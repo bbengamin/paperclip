@@ -59,9 +59,9 @@ export const modelProfiles: AdapterModelProfileDefinition[] = [
   },
 ];
 
-export const agentConfigurationDoc = `# codex_local agent configuration
+export const agentConfigurationDoc = `# codex_remote agent configuration
 
-Adapter: codex_local
+Adapter: codex_remote
 
 Core fields:
 - cwd (string, optional): default absolute working directory fallback for the agent process (created if missing when possible)

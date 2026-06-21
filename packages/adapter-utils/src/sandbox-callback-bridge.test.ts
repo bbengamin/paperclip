@@ -991,6 +991,62 @@ describe("sandbox callback bridge", () => {
     }
   });
 
+  it("processes requests pushed via stream discovery instead of polling", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "paperclip-bridge-stream-"));
+    cleanupDirs.push(root);
+    const queueDir = path.join(root, "queue");
+    const dirs = sandboxCallbackBridgeDirectories(queueDir);
+    const client = createFileSystemSandboxCallbackBridgeQueueClient();
+
+    await mkdir(dirs.requestsDir, { recursive: true });
+    const requestId = "stream-req-1";
+    const fileName = `${requestId}.json`;
+    await writeFile(
+      path.join(dirs.requestsDir, fileName),
+      JSON.stringify({
+        id: requestId,
+        method: "GET",
+        path: "/api/agents/me",
+        query: "",
+        headers: {},
+        body: "",
+        createdAt: new Date().toISOString(),
+      }),
+      "utf8",
+    );
+
+    const handledPaths: string[] = [];
+    let pushFileName: ((name: string) => void) | null = null;
+    let streamStopped = false;
+
+    const worker = await startSandboxCallbackBridgeWorker({
+      client,
+      queueDir,
+      authorizeRequest: () => null,
+      handleRequest: async (request) => {
+        handledPaths.push(request.path);
+        return { status: 200, headers: { "content-type": "application/json" }, body: "{\"ok\":true}" };
+      },
+      streamDiscovery: {
+        start: async ({ onFileName }) => {
+          pushFileName = onFileName;
+          return { stop: async () => { streamStopped = true; } };
+        },
+      },
+    });
+
+    expect(pushFileName).toBeTypeOf("function");
+    pushFileName!(fileName);
+
+    const responseFile = await waitForJsonFile(dirs.responsesDir);
+    const responseBody = JSON.parse(await readFile(path.join(dirs.responsesDir, responseFile), "utf8"));
+    expect(handledPaths).toEqual(["/api/agents/me"]);
+    expect(responseBody).toMatchObject({ id: requestId, status: 200 });
+
+    await worker.stop();
+    expect(streamStopped).toBe(true);
+  });
+
   it("marks command-managed bridge operations with the bridge execution channel", async () => {
     const runner = {
       execute: vi.fn(async () => ({
