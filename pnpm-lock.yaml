@@ -171,6 +171,22 @@ importers:
         specifier: ^5.7.3
         version: 5.9.3
 
+  packages/adapters/codex-remote:
+    dependencies:
+      '@paperclipai/adapter-utils':
+        specifier: workspace:*
+        version: link:../../adapter-utils
+      picocolors:
+        specifier: ^1.1.1
+        version: 1.1.1
+    devDependencies:
+      '@types/node':
+        specifier: ^24.6.0
+        version: 24.12.0
+      typescript:
+        specifier: ^5.7.3
+        version: 5.9.3
+
   packages/adapters/cursor-cloud:
     dependencies:
       '@cursor/sdk':
@@ -651,6 +667,9 @@ importers:
       '@paperclipai/adapter-codex-local':
         specifier: workspace:*
         version: link:../packages/adapters/codex-local
+      '@paperclipai/adapter-codex-remote':
+        specifier: workspace:*
+        version: link:../packages/adapters/codex-remote
       '@paperclipai/adapter-cursor-cloud':
         specifier: workspace:*
         version: link:../packages/adapters/cursor-cloud

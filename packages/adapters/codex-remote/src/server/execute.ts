@@ -16,6 +16,7 @@ import {
   readAdapterExecutionTarget,
   resolveAdapterExecutionTargetTimeoutSec,
   resolveAdapterExecutionTargetCommandForLogs,
+  runAdapterExecutionTargetShellCommand,
   runAdapterExecutionTargetProcess,
   startAdapterExecutionTargetPaperclipBridge,
 } from "@paperclipai/adapter-utils/execution-target";
@@ -37,6 +38,7 @@ import {
   stringifyPaperclipWakePayload,
   DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE,
   joinPromptSections,
+  type RunProcessResult,
 } from "@paperclipai/adapter-utils/server-utils";
 import {
   parseCodexJsonl,
@@ -44,12 +46,14 @@ import {
   isCodexTransientUpstreamError,
   isCodexUnknownSessionError,
 } from "./parse.js";
-import { pathExists, prepareManagedCodexHome, resolveManagedCodexHomeDir, resolveSharedCodexHomeDir } from "./codex-home.js";
+import { pathExists, prepareManagedCodexHome, prepareRemoteCodexHomeAsset, resolveManagedCodexHomeDir, resolveSharedCodexHomeDir } from "./codex-home.js";
 import { resolveCodexDesiredSkillNames } from "./skills.js";
 import { buildCodexExecArgs } from "./codex-args.js";
 import { SANDBOX_INSTALL_COMMAND } from "../index.js";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
+const SANDBOX_GLOBAL_CODEX_HOME = "/root/.codex";
+const SANDBOX_TERMINAL_ISSUE_GRACE_MS = 5_000;
 const CODEX_ROLLOUT_NOISE_RE =
   /^\d{4}-\d{2}-\d{2}T[^\s]+\s+ERROR\s+codex_core::rollout::list:\s+state db missing rollout path for thread\s+[a-z0-9-]+$/i;
 
@@ -82,9 +86,271 @@ function hasNonEmptyEnvValue(env: Record<string, string>, key: string): boolean 
   return typeof raw === "string" && raw.trim().length > 0;
 }
 
+function sanitizeCodexProgressMessage(text: string): string {
+  return text
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
+    .replace(/x-access-token:[^@\s]+@/gi, "x-access-token:[redacted]@")
+    .replace(/\b(?:github_pat|ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]+/g, "[redacted-token]")
+    .replace(/\b(?:PAPERCLIP_API_KEY|OPENAI_API_KEY|GITHUB_TOKEN|GH_TOKEN)=\S+/g, "$1=[redacted]")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join(" ")
+    .slice(0, 500)
+    .trim();
+}
+
+function summarizeCodexProgressMessage(text: string): string {
+  const sanitized = sanitizeCodexProgressMessage(text);
+  if (sanitized.length <= 100) return sanitized;
+  return `${sanitized.slice(0, 100).trimEnd()}...`;
+}
+
+function readCodexProgressFromJsonLine(line: string): string | null {
+  let event: unknown;
+  try {
+    event = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  const parsed = parseObject(event);
+  const type = asString(parsed.type, "");
+
+  if (type === "turn.started") {
+    return "Codex turn started";
+  }
+  if (type === "turn.completed") {
+    return "Codex turn completed";
+  }
+
+  if (type !== "item.started" && type !== "item.completed") {
+    return null;
+  }
+
+  const item = parseObject(parsed.item);
+  const itemType = asString(item.type, "");
+  if (itemType === "agent_message") {
+    return summarizeCodexProgressMessage(asString(item.text, ""));
+  }
+  if (itemType === "command_execution") {
+    return type === "item.started" ? "Running a shell command" : "Shell command completed";
+  }
+  if (itemType === "file_change" && type === "item.completed") {
+    return "Applied file changes";
+  }
+  if (itemType === "tool_use") {
+    const name = summarizeCodexProgressMessage(asString(item.name, "tool"));
+    return type === "item.started" ? `Using ${name}` : `${name} completed`;
+  }
+
+  return null;
+}
+
+function collectCodexProgressMessages(input: { buffer: string; chunk: string }): {
+  buffer: string;
+  messages: string[];
+} {
+  const combined = input.buffer + input.chunk;
+  const lines = combined.split(/\r?\n/);
+  const nextBuffer = lines.pop() ?? "";
+  const messages = lines
+    .map((line) => readCodexProgressFromJsonLine(line.trim()))
+    .filter((message): message is string => Boolean(message));
+  return { buffer: nextBuffer, messages };
+}
+
+function buildCodexSyntheticProgressJsonl(input: { id: number; message: string }): string {
+  return `${JSON.stringify({
+    type: "item.completed",
+    item: {
+      id: `paperclip_progress_${input.id}`,
+      type: "agent_message",
+      text: input.message,
+    },
+  })}\n`;
+}
+
+type CodexRunAttempt = {
+  proc: Pick<RunProcessResult, "exitCode" | "signal" | "timedOut" | "stdout" | "stderr">;
+  rawStderr: string;
+  parsed: ReturnType<typeof parseCodexJsonl>;
+};
+
+type TerminalIssueDisposition = {
+  status: string;
+  issueId: string | null;
+  issueKey: string | null;
+  at: string;
+};
+
+function readTerminalIssueDispositionPayload(
+  activity: {
+    source: string | null;
+    status: string | null;
+    at: string | null;
+    payload: Record<string, unknown>;
+  },
+  expectedIssueIdOrKey: string | null = null,
+): TerminalIssueDisposition | null {
+  if (activity.source !== "paperclip_issue") return null;
+  const status = activity.status?.startsWith("terminal:")
+    ? activity.status.slice("terminal:".length).trim()
+    : "";
+  if (!status) return null;
+  const read = (key: string) => {
+    const value = activity.payload[key];
+    return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+  };
+  const issueId = read("issueId");
+  const issueKey = read("issueKey");
+  if (
+    expectedIssueIdOrKey &&
+    issueId !== expectedIssueIdOrKey &&
+    issueKey !== expectedIssueIdOrKey
+  ) {
+    return null;
+  }
+  return {
+    status,
+    issueId,
+    issueKey,
+    at: activity.at ?? new Date().toISOString(),
+  };
+}
+
+function buildCodexTerminalIssueAttempt(input: {
+  disposition: TerminalIssueDisposition;
+  stdout: string;
+}): CodexRunAttempt {
+  const issueName = input.disposition.issueKey ?? input.disposition.issueId ?? "Paperclip issue";
+  const message = `${issueName} was marked ${input.disposition.status} by this run; finalizing the remote Codex run from Paperclip disposition.`;
+  const stdout = `${input.stdout}${buildCodexSyntheticProgressJsonl({ id: 0, message })}`;
+  return {
+    proc: {
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      stdout,
+      stderr: "",
+    },
+    rawStderr: "",
+    parsed: parseCodexJsonl(stdout),
+  };
+}
+
+async function runSandboxPaperclipPreflight(input: {
+  runId: string;
+  target: ReturnType<typeof readAdapterExecutionTarget>;
+  cwd: string;
+  env: Record<string, string>;
+  timeoutSec: number;
+  onLog: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
+}): Promise<AdapterExecutionResult | null> {
+  if (!input.target || input.target.kind !== "remote" || input.target.transport !== "sandbox") {
+    return null;
+  }
+
+  const script = [
+    "set -eu",
+    "mkdir -p .paperclip-runtime/codex",
+    'if [ -n "${CODEX_HOME:-}" ]; then',
+    '  test -f "$CODEX_HOME/config.toml"',
+    '  test ! -f "$CODEX_HOME/auth.json"',
+    'fi',
+    "probe_file=.paperclip-runtime/codex/preflight-write-check",
+    "printf '%s\\n' paperclip-preflight > \"$probe_file\"",
+    "rm -f \"$probe_file\"",
+    "if [ -n \"${PAPERCLIP_API_URL:-}\" ] && [ -n \"${PAPERCLIP_API_KEY:-}\" ] && [ -n \"${PAPERCLIP_TASK_ID:-}\" ]; then",
+    "  curl -fsS -H \"Authorization: Bearer $PAPERCLIP_API_KEY\" \"$PAPERCLIP_API_URL/api/issues/$PAPERCLIP_TASK_ID/heartbeat-context\" >/dev/null",
+    "fi",
+  ].join("\n");
+
+  const result = await runAdapterExecutionTargetShellCommand(
+    input.runId,
+    input.target,
+    script,
+    {
+      cwd: input.cwd,
+      env: input.env,
+      timeoutSec: Math.min(Math.max(input.timeoutSec, 1), 30),
+      onLog: input.onLog,
+    },
+  );
+
+  if (!result.timedOut && result.exitCode === 0) return null;
+
+  const detail = [result.stderr.trim(), result.stdout.trim()].filter(Boolean).join("\n");
+  const message = result.timedOut
+    ? "Codex sandbox preflight timed out before starting Codex."
+    : `Codex sandbox preflight failed before starting Codex${detail ? `: ${detail}` : "."}`;
+  return {
+    exitCode: result.exitCode ?? 1,
+    signal: result.signal,
+    timedOut: result.timedOut,
+    errorMessage: message,
+    errorCode: "codex_sandbox_preflight_failed",
+    resultJson: {
+      phase: "codex_sandbox_preflight",
+      stdout: result.stdout,
+      stderr: result.stderr,
+      timedOut: result.timedOut,
+    },
+  };
+}
+
 function resolveCodexBillingType(env: Record<string, string>): "api" | "subscription" {
   // Codex uses API-key auth when OPENAI_API_KEY is present; otherwise rely on local login/session auth.
   return hasNonEmptyEnvValue(env, "OPENAI_API_KEY") ? "api" : "subscription";
+}
+
+async function installSandboxGlobalCodexHome(input: {
+  runId: string;
+  target: ReturnType<typeof overrideAdapterExecutionTargetRemoteCwd>;
+  sourceRemoteHome: string | null;
+  timeoutSec: number;
+  onLog: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
+}): Promise<string | null> {
+  if (!input.target || input.target.kind !== "remote" || input.target.transport !== "sandbox" || !input.sourceRemoteHome) {
+    return null;
+  }
+
+  const script = [
+    "set -eu",
+    `src=${JSON.stringify(input.sourceRemoteHome)}`,
+    `dst=${JSON.stringify(SANDBOX_GLOBAL_CODEX_HOME)}`,
+    'test -d "$src"',
+    'rm -rf "$dst"',
+    'mkdir -p "$dst"',
+    'cp -a "$src"/. "$dst"/',
+    'rm -f "$dst/auth.json"',
+    'chmod 700 "$dst"',
+    'find "$dst" -type f -exec chmod 600 {} \\;',
+    'test -f "$dst/config.toml"',
+    'test ! -f "$dst/auth.json"',
+  ].join("\n");
+
+  const result = await runAdapterExecutionTargetShellCommand(
+    input.runId,
+    input.target,
+    script,
+    {
+      cwd: "/",
+      env: {},
+      timeoutSec: Math.min(Math.max(input.timeoutSec, 1), 30),
+      onLog: input.onLog,
+    },
+  );
+
+  if (!result.timedOut && result.exitCode === 0) {
+    return SANDBOX_GLOBAL_CODEX_HOME;
+  }
+
+  const detail = [result.stderr.trim(), result.stdout.trim()].filter(Boolean).join("\n");
+  throw new Error(
+    result.timedOut
+      ? "Timed out while installing sandbox global Codex home."
+      : `Failed to install sandbox global Codex home${detail ? `: ${detail}` : "."}`,
+  );
 }
 
 function resolveCodexBiller(env: Record<string, string>, billingType: "api" | "subscription"): string {
@@ -168,8 +434,32 @@ type EnsureCodexSkillsInjectedOptions = {
   skillsHome?: string;
   skillsEntries?: Array<{ key: string; runtimeName: string; source: string }>;
   desiredSkillNames?: string[];
+  injectionMode?: "symlink" | "copy";
   linkSkill?: (source: string, target: string) => Promise<void>;
 };
+
+function isFilesystemPermissionError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const code = (error as { code?: unknown }).code;
+  return code === "EPERM" || code === "EACCES";
+}
+
+async function copyCodexSkillFallback(
+  source: string,
+  target: string,
+  options: { repairExisting?: boolean } = {},
+): Promise<"created" | "repaired" | "skipped"> {
+  const existing = await fs.lstat(target).catch(() => null);
+  if (existing?.isSymbolicLink()) {
+    await fs.unlink(target);
+  } else if (existing?.isDirectory() && options.repairExisting === true) {
+    await fs.rm(target, { recursive: true, force: true });
+  } else if (existing) {
+    return "skipped";
+  }
+  await fs.cp(source, target, { recursive: true, dereference: true });
+  return existing ? "repaired" : "created";
+}
 
 type CodexTransientFallbackMode =
   | "same_session"
@@ -231,10 +521,21 @@ export async function ensureCodexSkillsInjected(
   const skillsHome = options.skillsHome ?? resolveCodexSkillsDir(resolveSharedCodexHomeDir());
   await fs.mkdir(skillsHome, { recursive: true });
   const linkSkill = options.linkSkill;
+  const injectionMode = options.injectionMode ?? "symlink";
   for (const entry of skillsEntries) {
     const target = path.join(skillsHome, entry.runtimeName);
 
     try {
+      if (injectionMode === "copy") {
+        const result = await copyCodexSkillFallback(entry.source, target, { repairExisting: true });
+        if (result === "skipped") continue;
+        await onLog(
+          "stdout",
+          `[paperclip] ${result === "repaired" ? "Repaired" : "Copied"} Codex skill "${entry.runtimeName}" into ${skillsHome}\n`,
+        );
+        continue;
+      }
+
       const existing = await fs.lstat(target).catch(() => null);
       if (existing?.isSymbolicLink()) {
         const linkedPath = await fs.readlink(target).catch(() => null);
@@ -268,6 +569,20 @@ export async function ensureCodexSkillsInjected(
         `[paperclip] ${result === "repaired" ? "Repaired" : "Injected"} Codex skill "${entry.runtimeName}" into ${skillsHome}\n`,
       );
     } catch (err) {
+      if (!linkSkill && isFilesystemPermissionError(err)) {
+        try {
+          const result = await copyCodexSkillFallback(entry.source, target);
+          if (result !== "skipped") {
+            await onLog(
+              "stdout",
+              `[paperclip] ${result === "repaired" ? "Repaired" : "Copied"} Codex skill "${entry.runtimeName}" into ${skillsHome} because symlinks are unavailable\n`,
+            );
+            continue;
+          }
+        } catch {
+          // Fall through to the original diagnostic below.
+        }
+      }
       await onLog(
         "stderr",
         `[paperclip] Failed to inject Codex skill "${entry.key}" into ${skillsHome}: ${err instanceof Error ? err.message : String(err)}\n`,
@@ -328,6 +643,18 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     legacyRemoteExecution: ctx.executionTransport?.remoteExecution,
   });
   const executionTargetIsRemote = adapterExecutionTargetIsRemote(executionTarget);
+  const executionTargetIsSandbox =
+    executionTarget?.kind === "remote" && executionTarget.transport === "sandbox";
+  const remoteTimingStartedAt = Date.now();
+  const logRemoteTiming = async (message: string) => {
+    if (!executionTargetIsRemote) return;
+    await onLog("stdout", `[paperclip] codex_remote timing +${Date.now() - remoteTimingStartedAt}ms: ${message}\n`);
+  };
+  await logRemoteTiming(`execution target resolved (${describeAdapterExecutionTarget(executionTarget)})`);
+  const remoteGitSandboxConfig = parseObject(config.remoteGitSandbox);
+  const skipRemoteWorkspaceSync =
+    executionTargetIsRemote &&
+    (config.remoteWorkspaceSync === false || remoteGitSandboxConfig.enabled === true);
   const configuredCodexHome =
     typeof envConfig.CODEX_HOME === "string" && envConfig.CODEX_HOME.trim().length > 0
       ? path.resolve(envConfig.CODEX_HOME.trim())
@@ -357,6 +684,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       skillsHome: codexSkillsDir,
       skillsEntries: codexSkillEntries,
       desiredSkillNames,
+      injectionMode: executionTargetIsSandbox ? "copy" : "symlink",
     },
   );
   const timeoutSec = resolveAdapterExecutionTargetTimeoutSec(
@@ -365,44 +693,87 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   );
   const graceSec = asNumber(config.graceSec, 20);
   let effectiveExecutionCwd = adapterExecutionTargetRemoteCwd(executionTarget, cwd);
+  // For remote runs, sync a sandbox-sanitized copy of the Codex home so the
+  // sandbox does not inherit host-only config.toml sections (notably
+  // `mcp_servers`, which point at host binaries and stall Codex for each
+  // server's startup_timeout_sec on every run).
+  const remoteCodexHomeAsset = executionTargetIsRemote
+    ? await prepareRemoteCodexHomeAsset(effectiveCodexHome)
+    : null;
+  await logRemoteTiming(remoteCodexHomeAsset
+    ? "prepared sanitized remote CODEX_HOME asset without auth.json"
+    : "using local CODEX_HOME");
+  const remoteCodexHomeAssetDir = remoteCodexHomeAsset?.dir ?? effectiveCodexHome;
   const preparedExecutionTargetRuntime = executionTargetIsRemote
     ? await (async () => {
         await onLog(
           "stdout",
-          `[paperclip] Syncing workspace and CODEX_HOME to ${describeAdapterExecutionTarget(executionTarget)}.\n`,
+          skipRemoteWorkspaceSync
+            ? `[paperclip] Syncing CODEX_HOME to ${describeAdapterExecutionTarget(executionTarget)}; using remote workspace at ${effectiveExecutionCwd} (skipping workspace archive sync).\n`
+            : `[paperclip] Syncing workspace and CODEX_HOME to ${describeAdapterExecutionTarget(executionTarget)}.\n`,
         );
-        return await prepareAdapterExecutionTargetRuntime({
+        const prepared = await prepareAdapterExecutionTargetRuntime({
           runId,
           target: executionTarget,
           adapterKey: "codex",
           timeoutSec,
           workspaceLocalDir: cwd,
+          // For runtime-owned remote workspaces, anchor the runtime (and thus
+          // the synced CODEX_HOME asset) at the target cwd without uploading
+          // or overwriting a host workspace archive.
+          ...(skipRemoteWorkspaceSync
+            ? { workspaceRemoteDir: effectiveExecutionCwd, syncWorkspace: false }
+            : {}),
           installCommand: SANDBOX_INSTALL_COMMAND,
           detectCommand: command,
           assets: [
             {
               key: "home",
-              localDir: effectiveCodexHome,
+              localDir: remoteCodexHomeAssetDir,
               followSymlinks: true,
             },
           ],
         });
-      })()
+        await logRemoteTiming(`synced remote runtime assets to ${prepared.workspaceRemoteDir}`);
+        return prepared;
+      })().catch(async (error) => {
+        await remoteCodexHomeAsset?.cleanup();
+        throw error;
+      })
     : null;
   if (preparedExecutionTargetRuntime?.workspaceRemoteDir) {
     effectiveExecutionCwd = preparedExecutionTargetRuntime.workspaceRemoteDir;
   }
   const runtimeExecutionTarget = overrideAdapterExecutionTargetRemoteCwd(executionTarget, effectiveExecutionCwd);
-  const executionTargetIsSandbox =
-    runtimeExecutionTarget?.kind === "remote" && runtimeExecutionTarget.transport === "sandbox";
   const restoreRemoteWorkspace = preparedExecutionTargetRuntime
     ? () => preparedExecutionTargetRuntime.restoreWorkspace()
     : null;
   let paperclipBridge: Awaited<ReturnType<typeof startAdapterExecutionTargetPaperclipBridge>> = null;
+  let codexProgressBuffer = "";
+  let latestCodexProgressMessage: string | null = null;
+  let lastEmittedCodexProgressMessage: string | null = null;
+  let bridgeAliveWithoutCodexOutputEmitted = false;
+  let syntheticProgressId = 0;
+  let capturedCodexStdout = "";
+  let terminalIssueDisposition: TerminalIssueDisposition | null = null;
+  let resolveTerminalIssueDisposition: ((disposition: TerminalIssueDisposition) => void) | null = null;
+  const terminalIssueDispositionPromise = new Promise<TerminalIssueDisposition>((resolve) => {
+    resolveTerminalIssueDisposition = resolve;
+  });
   const remoteCodexHome = executionTargetIsRemote
     ? preparedExecutionTargetRuntime?.assetDirs.home ??
       path.posix.join(effectiveExecutionCwd, ".paperclip-runtime", "codex", "home")
     : null;
+  const sandboxGlobalCodexHome = await installSandboxGlobalCodexHome({
+    runId,
+    target: runtimeExecutionTarget,
+    sourceRemoteHome: remoteCodexHome,
+    timeoutSec,
+    onLog,
+  });
+  await logRemoteTiming(sandboxGlobalCodexHome
+    ? `installed sandbox global Codex home at ${sandboxGlobalCodexHome}`
+    : "using synced remote CODEX_HOME");
   const hasExplicitApiKey =
     typeof envConfig.PAPERCLIP_API_KEY === "string" && envConfig.PAPERCLIP_API_KEY.trim().length > 0;
   const env: Record<string, string> = { ...buildPaperclipEnv(agent) };
@@ -481,7 +852,16 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   if (runtimePrimaryUrl) {
     env.PAPERCLIP_RUNTIME_PRIMARY_URL = runtimePrimaryUrl;
   }
-  env.CODEX_HOME = remoteCodexHome ?? effectiveCodexHome;
+  // Point Codex at the synced remote home (which carries config.toml — including
+  // the model_provider/base_url and any bearer token — plus auth.json) so a
+  // provider-realized remote sandbox uses the configured provider instead of
+  // falling back to the default api.openai.com endpoint. Sandbox runs use the
+  // user-level /root/.codex home because Codex treats that as the trusted global
+  // provider config; SSH remotes keep the synced runtime home.
+  env.CODEX_HOME = sandboxGlobalCodexHome ?? remoteCodexHome ?? effectiveCodexHome;
+  if (sandboxGlobalCodexHome) {
+    env.HOME = path.posix.dirname(sandboxGlobalCodexHome);
+  }
   if (!hasExplicitApiKey && authToken) {
     env.PAPERCLIP_API_KEY = authToken;
   }
@@ -494,10 +874,46 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       timeoutSec,
       hostApiToken: env.PAPERCLIP_API_KEY,
       onLog,
+      onActivity: async (activity) => {
+        const disposition = readTerminalIssueDispositionPayload(activity, wakeTaskId);
+        if (disposition && !terminalIssueDisposition) {
+          terminalIssueDisposition = disposition;
+          resolveTerminalIssueDisposition?.(disposition);
+          const issueName = disposition.issueKey ?? disposition.issueId ?? "Paperclip issue";
+          await onLog(
+            "stdout",
+            `[paperclip] ${issueName} marked ${disposition.status} through the sandbox bridge; allowing ${SANDBOX_TERMINAL_ISSUE_GRACE_MS}ms for Codex to exit.\n`,
+          );
+          return;
+        }
+        if (activity.source !== "sandbox_bridge" || activity.status !== "alive") return;
+        const progress = latestCodexProgressMessage
+          ? summarizeCodexProgressMessage(latestCodexProgressMessage)
+          : "";
+        if (!progress) {
+          if (bridgeAliveWithoutCodexOutputEmitted) return;
+          bridgeAliveWithoutCodexOutputEmitted = true;
+          syntheticProgressId += 1;
+          await onLog("stdout", buildCodexSyntheticProgressJsonl({
+            id: syntheticProgressId,
+            message: "Sandbox bridge alive; waiting for Codex output",
+          }));
+          return;
+        }
+        if (progress === lastEmittedCodexProgressMessage) return;
+        lastEmittedCodexProgressMessage = progress;
+        const message = `Still working: ${progress}`;
+        syntheticProgressId += 1;
+        await onLog("stdout", buildCodexSyntheticProgressJsonl({
+          id: syntheticProgressId,
+          message,
+        }));
+      },
     });
     if (paperclipBridge) {
       Object.assign(env, paperclipBridge.env);
     }
+    await logRemoteTiming("sandbox callback bridge started");
   }
   const effectiveEnv = Object.fromEntries(
     Object.entries({ ...process.env, ...env }).filter(
@@ -521,8 +937,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     graceSec,
     onLog,
   });
+  await logRemoteTiming("runtime command install/probe completed");
   await ensureAdapterExecutionTargetCommandResolvable(command, executionTarget, cwd, runtimeEnv);
   const resolvedCommand = await resolveAdapterExecutionTargetCommandForLogs(command, executionTarget, cwd, runtimeEnv);
+  await logRemoteTiming(`resolved command ${resolvedCommand}`);
   const loggedEnv = buildInvocationEnvForLogs(env, {
     runtimeEnv,
     includeRuntimeKeys: ["HOME"],
@@ -678,11 +1096,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   };
 
   const runAttempt = async (resumeSessionId: string | null) => {
+    await logRemoteTiming(resumeSessionId ? `starting Codex resume ${resumeSessionId}` : "starting fresh Codex exec");
     const execArgs = buildCodexExecArgs(
       forceSaferInvocation ? { ...config, fastMode: false } : config,
       {
         resumeSessionId,
         skipGitRepoCheck: executionTargetIsSandbox,
+        isolatePaperclipTaskSystem: executionTargetIsSandbox,
       },
     );
     const args = execArgs.args;
@@ -707,6 +1127,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       });
     }
 
+    let firstOutputLogged = false;
     const proc = await runAdapterExecutionTargetProcess(runId, runtimeExecutionTarget, command, args, {
       cwd,
       env,
@@ -715,6 +1136,18 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       graceSec,
       onSpawn,
       onLog: async (stream, chunk) => {
+        if (!firstOutputLogged && chunk.length > 0) {
+          firstOutputLogged = true;
+          await logRemoteTiming(`first Codex ${stream} chunk received (${Buffer.byteLength(chunk, "utf8")} bytes)`);
+        }
+        if (stream === "stdout") {
+          capturedCodexStdout += chunk;
+          const collected = collectCodexProgressMessages({ buffer: codexProgressBuffer, chunk });
+          codexProgressBuffer = collected.buffer;
+          for (const message of collected.messages) {
+            latestCodexProgressMessage = message;
+          }
+        }
         if (stream !== "stderr") {
           await onLog(stream, chunk);
           return;
@@ -724,6 +1157,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         await onLog(stream, cleaned);
       },
     });
+    await logRemoteTiming(`Codex process completed exit=${proc.exitCode ?? "null"} timedOut=${proc.timedOut}`);
     const cleanedStderr = stripCodexRolloutNoise(proc.stderr);
     return {
       proc: {
@@ -735,8 +1169,78 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     };
   };
 
+  const runAttemptWithTerminalIssueFinalization = async (resumeSessionId: string | null): Promise<CodexRunAttempt> => {
+    const attemptPromise = runAttempt(resumeSessionId);
+    if (!executionTargetIsSandbox || !paperclipBridge) {
+      return await attemptPromise;
+    }
+
+    const attemptOutcomePromise = attemptPromise.then(
+      (attempt) => ({ kind: "attempt" as const, attempt }),
+      (error: unknown) => ({ kind: "attempt_error" as const, error }),
+    );
+    const terminalSignalPromise = terminalIssueDispositionPromise.then((disposition) => ({
+      kind: "terminal_signal" as const,
+      disposition,
+    }));
+
+    const firstWinner = await Promise.race([
+      attemptOutcomePromise,
+      terminalSignalPromise,
+    ]);
+    if (firstWinner.kind === "attempt") {
+      return firstWinner.attempt;
+    }
+    if (firstWinner.kind === "attempt_error") {
+      throw firstWinner.error;
+    }
+
+    const graceWinner = await Promise.race([
+      attemptOutcomePromise,
+      new Promise<{ kind: "terminal_issue"; disposition: TerminalIssueDisposition }>((resolve) => {
+        setTimeout(() => resolve({
+          kind: "terminal_issue",
+          disposition: firstWinner.disposition,
+        }), SANDBOX_TERMINAL_ISSUE_GRACE_MS);
+      }),
+    ]);
+    if (
+      graceWinner.kind === "attempt" &&
+      !graceWinner.attempt.proc.timedOut &&
+      (graceWinner.attempt.proc.exitCode ?? 0) === 0
+    ) {
+      return graceWinner.attempt;
+    }
+    if (graceWinner.kind === "attempt_error") {
+      await onLog(
+        "stderr",
+        `[paperclip] Remote Codex process failed after Paperclip disposition: ${graceWinner.error instanceof Error ? graceWinner.error.message : String(graceWinner.error)}\n`,
+      );
+    } else if (graceWinner.kind === "attempt") {
+      await onLog(
+        "stdout",
+        `[paperclip] Remote Codex process exited nonzero after Paperclip disposition; finalizing run from issue status.\n`,
+      );
+    }
+    const terminalDisposition =
+      graceWinner.kind === "terminal_issue"
+        ? graceWinner.disposition
+        : firstWinner.disposition;
+    if (graceWinner.kind === "terminal_issue") {
+      const issueName = terminalDisposition.issueKey ?? terminalDisposition.issueId ?? "Paperclip issue";
+      await onLog(
+        "stdout",
+        `[paperclip] Codex did not exit after ${issueName} was marked ${terminalDisposition.status}; finalizing run from Paperclip disposition.\n`,
+      );
+    }
+    return buildCodexTerminalIssueAttempt({
+      disposition: terminalDisposition,
+      stdout: capturedCodexStdout,
+    });
+  };
+
   const toResult = (
-    attempt: { proc: { exitCode: number | null; signal: string | null; timedOut: boolean; stdout: string; stderr: string }; rawStderr: string; parsed: ReturnType<typeof parseCodexJsonl> },
+    attempt: CodexRunAttempt,
     clearSessionOnMissingSession = false,
     isRetry = false,
   ): AdapterExecutionResult => {
@@ -826,7 +1330,18 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   };
 
   try {
-    const initial = await runAttempt(sessionId);
+    const preflightFailure = await runSandboxPaperclipPreflight({
+      runId,
+      target: runtimeExecutionTarget ?? null,
+      cwd: effectiveExecutionCwd,
+      env: runtimeEnv,
+      timeoutSec,
+      onLog,
+    });
+    await logRemoteTiming(preflightFailure ? "sandbox Paperclip preflight failed" : "sandbox Paperclip preflight passed");
+    if (preflightFailure) return preflightFailure;
+
+    const initial = await runAttemptWithTerminalIssueFinalization(sessionId);
     if (
       sessionId &&
       !initial.proc.timedOut &&
@@ -837,7 +1352,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         "stdout",
         `[paperclip] Codex resume session "${sessionId}" is unavailable; retrying with a fresh session.\n`,
       );
-      const retry = await runAttempt(null);
+      const retry = await runAttemptWithTerminalIssueFinalization(null);
       return toResult(retry, true, true);
     }
 
@@ -853,5 +1368,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       );
       await restoreRemoteWorkspace();
     }
+    await remoteCodexHomeAsset?.cleanup();
   }
 }

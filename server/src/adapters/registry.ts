@@ -49,6 +49,18 @@ import {
   modelProfiles as codexModelProfiles,
 } from "@paperclipai/adapter-codex-local";
 import {
+  execute as codexRemoteExecute,
+  listCodexSkills as listCodexRemoteSkills,
+  syncCodexSkills as syncCodexRemoteSkills,
+  testEnvironment as codexRemoteTestEnvironment,
+  sessionCodec as codexRemoteSessionCodec,
+  getQuotaWindows as codexRemoteGetQuotaWindows,
+} from "@paperclipai/adapter-codex-remote/server";
+import {
+  models as codexRemoteModels,
+  modelProfiles as codexRemoteModelProfiles,
+} from "@paperclipai/adapter-codex-remote";
+import {
   execute as cursorExecute,
   listCursorSkills,
   syncCursorSkills,
@@ -313,6 +325,32 @@ const nativeCodexLocalAdapter: ServerAdapterModule = {
 
 const codexLocalAdapter = createWrappedCodexLocalAdapter(nativeCodexLocalAdapter);
 
+// codex_remote is its own standalone adapter package (sandbox/bridge runtime),
+// independent of the upstream codex-local package. The wrapper below adds the
+// sandbox preflight/verify + remote defaults on top of this base.
+const nativeCodexRemoteAdapter: ServerAdapterModule = {
+  type: "codex_remote",
+  execute: codexRemoteExecute,
+  testEnvironment: codexRemoteTestEnvironment,
+  listSkills: listCodexRemoteSkills,
+  syncSkills: syncCodexRemoteSkills,
+  sessionCodec: codexRemoteSessionCodec,
+  sessionManagement:
+    getAdapterSessionManagement("codex_remote") ??
+    getAdapterSessionManagement("codex_local") ??
+    undefined,
+  models: codexRemoteModels,
+  modelProfiles: codexRemoteModelProfiles,
+  listModels: listCodexModels,
+  refreshModels: refreshCodexModels,
+  supportsLocalAgentJwt: true,
+  supportsInstructionsBundle: true,
+  instructionsPathKey: "instructionsFilePath",
+  requiresMaterializedRuntimeSkills: false,
+  getRuntimeCommandSpec: (config) => buildNpmRuntimeCommandSpec(config, "codex", "@openai/codex"),
+  getQuotaWindows: codexRemoteGetQuotaWindows,
+};
+
 const cursorLocalAdapter: ServerAdapterModule = {
   type: "cursor",
   execute: cursorExecute,
@@ -504,7 +542,7 @@ const hermesLocalAdapter: ServerAdapterModule = {
 };
 
 const codexRemoteAdapter = createCodexRemoteAdapter({
-  base: codexLocalAdapter,
+  base: nativeCodexRemoteAdapter,
   agentConfigurationDoc: `${codexAgentConfigurationDoc}
 
 Remote adapter: codex_remote

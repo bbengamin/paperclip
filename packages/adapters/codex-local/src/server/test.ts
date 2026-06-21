@@ -13,7 +13,6 @@ import {
   ensureAdapterExecutionTargetDirectory,
   maybeRunSandboxInstallCommand,
   runAdapterExecutionTargetProcess,
-  runAdapterExecutionTargetShellCommand,
   describeAdapterExecutionTarget,
   resolveAdapterExecutionTargetCwd,
   prepareAdapterExecutionTargetRuntime,
@@ -60,383 +59,7 @@ function summarizeProbeDetail(stdout: string, stderr: string, parsedError: strin
 }
 
 const CODEX_AUTH_REQUIRED_RE =
-  /(?:not\s+logged\s+in|login\s+required|authentication\s+required|authentication\s+token\s+has\s+been\s+invalidated|token_invalidated|unauthorized|invalid(?:\s+or\s+missing)?\s+api(?:[_\s-]?key)?|openai[_\s-]?api[_\s-]?key|api[_\s-]?key.*required|please\s+run\s+`?codex\s+login`?)/i;
-// A cold Cloudflare sandbox needs ~60-90s for the first `codex exec`: the CLI
-// cold-starts, performs a model-refresh that can itself time out, then runs the
-// turn. The host RPC budget is this value + a 30s overhead buffer (see
-// resolvePluginExecuteRpcTimeoutMs), capped at 15 min, so 150s leaves the RPC
-// ~180s — enough to actually observe the probe result instead of the RPC
-// timing out and surfacing an opaque 500.
-const SANDBOX_HELLO_PROBE_TIMEOUT_SEC = 150;
-
-function parseKeyValueLines(text: string): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const line of text.split(/\r?\n/)) {
-    const match = /^([^=]+)=(.*)$/.exec(line.trim());
-    if (!match) continue;
-    out[match[1]!.trim()] = match[2]!.trim();
-  }
-  return out;
-}
-
-async function addRemoteCodexHomeDiagnostics(input: {
-  checks: AdapterEnvironmentCheck[];
-  runId: string;
-  target: AdapterEnvironmentTestContext["executionTarget"] | null;
-  cwd: string;
-  env: Record<string, string>;
-}): Promise<void> {
-  const codexHome = input.env.CODEX_HOME?.trim();
-  if (!codexHome || !input.target || input.target.kind !== "remote") return;
-
-  const probe = await runAdapterExecutionTargetShellCommand(
-    input.runId,
-    input.target,
-    [
-      'printf "home=%s\\n" "$CODEX_HOME"',
-      "for name in auth.json config.toml config.json instructions.md; do",
-      '  file="$CODEX_HOME/$name"',
-      '  if [ -f "$file" ]; then',
-      '    bytes=$(wc -c < "$file" | tr -d "[:space:]")',
-      '    printf "%s=%s\\n" "$name" "$bytes"',
-      "  else",
-      '    printf "%s=missing\\n" "$name"',
-      "  fi",
-      "done",
-    ].join("\n"),
-    {
-      cwd: input.cwd,
-      env: input.env,
-      timeoutSec: 15,
-      graceSec: 5,
-      onLog: async () => {},
-    },
-  ).catch((error) => ({
-    exitCode: 1,
-    signal: null,
-    timedOut: false,
-    stdout: "",
-    stderr: error instanceof Error ? error.message : String(error),
-    pid: null,
-    startedAt: new Date().toISOString(),
-  }));
-
-  if (probe.timedOut) {
-    input.checks.push({
-      code: "codex_remote_home_diagnostic_timed_out",
-      level: "warn",
-      message: "Timed out checking remote Codex home.",
-      hint: "The sandbox command runner is slow before Codex starts; retry the environment test.",
-    });
-    return;
-  }
-
-  if ((probe.exitCode ?? 1) !== 0) {
-    input.checks.push({
-      code: "codex_remote_home_diagnostic_failed",
-      level: "warn",
-      message: "Could not inspect remote Codex home.",
-      detail: summarizeProbeDetail(probe.stdout, probe.stderr, null) ?? undefined,
-    });
-    return;
-  }
-
-  const facts = parseKeyValueLines(probe.stdout);
-  const authBytes = facts["auth.json"];
-  if (authBytes && authBytes !== "missing") {
-    input.checks.push({
-      code: "codex_remote_auth_present",
-      level: "info",
-      message: "Remote Codex auth file is present.",
-      detail: `CODEX_HOME=${facts.home ?? codexHome}; auth.json=${authBytes} bytes`,
-    });
-  } else {
-    input.checks.push({
-      code: "codex_remote_auth_missing",
-      level: "warn",
-      message: "Remote Codex auth file is missing.",
-      detail: `CODEX_HOME=${facts.home ?? codexHome}`,
-      hint: "Run `codex login` on the Paperclip host, then retry. Paperclip should copy the managed Codex home into the sandbox.",
-    });
-  }
-
-  const configFacts = ["config.toml", "config.json", "instructions.md"]
-    .map((name) => `${name}=${facts[name] ?? "unknown"}`)
-    .join("; ");
-  input.checks.push({
-    code: "codex_remote_home_files",
-    level: "info",
-    message: "Remote Codex home file check completed.",
-    detail: configFacts,
-  });
-}
-
-async function addRemoteCodexCliDiagnostics(input: {
-  checks: AdapterEnvironmentCheck[];
-  runId: string;
-  target: AdapterEnvironmentTestContext["executionTarget"] | null;
-  cwd: string;
-  command: string;
-  env: Record<string, string>;
-}): Promise<{ authMode: string | null } | null> {
-  const codexHome = input.env.CODEX_HOME?.trim();
-  if (!codexHome || !input.target || input.target.kind !== "remote") return null;
-
-  const probe = await runAdapterExecutionTargetShellCommand(
-    input.runId,
-    input.target,
-    [
-      `codex_path=$(command -v ${JSON.stringify(input.command)} 2>/dev/null || true)`,
-      'printf "codex_path=%s\\n" "$codex_path"',
-      `version=$(${JSON.stringify(input.command)} --version 2>&1 | head -n 1 || true)`,
-      'printf "codex_version=%s\\n" "$version"',
-      "node -e \"const fs=require('fs'); const p=process.env.CODEX_HOME + '/auth.json'; const j=JSON.parse(fs.readFileSync(p,'utf8')); console.log('auth_mode=' + (j.auth_mode || '')); console.log('auth_keys=' + Object.keys(j).sort().join(','));\" 2>/dev/null || printf \"auth_mode=unreadable\\nauth_keys=unreadable\\n\"",
-      `help=$(${JSON.stringify(input.command)} exec --help 2>&1 | head -n 1 || true)`,
-      'printf "exec_help=%s\\n" "$help"',
-    ].join("\n"),
-    {
-      cwd: input.cwd,
-      env: input.env,
-      timeoutSec: 20,
-      graceSec: 5,
-      onLog: async () => {},
-    },
-  ).catch((error) => ({
-    exitCode: 1,
-    signal: null,
-    timedOut: false,
-    stdout: "",
-    stderr: error instanceof Error ? error.message : String(error),
-    pid: null,
-    startedAt: new Date().toISOString(),
-  }));
-
-  if (probe.timedOut) {
-    input.checks.push({
-      code: "codex_remote_cli_diagnostic_timed_out",
-      level: "warn",
-      message: "Timed out checking remote Codex CLI diagnostics.",
-      hint: "The CLI may be hanging before the hello probe. Check `codex --version` manually inside the sandbox.",
-    });
-    return null;
-  }
-
-  if ((probe.exitCode ?? 1) !== 0) {
-    input.checks.push({
-      code: "codex_remote_cli_diagnostic_failed",
-      level: "warn",
-      message: "Could not inspect remote Codex CLI diagnostics.",
-      detail: summarizeProbeDetail(probe.stdout, probe.stderr, null) ?? undefined,
-    });
-    return null;
-  }
-
-  const facts = parseKeyValueLines(probe.stdout);
-  input.checks.push({
-    code: "codex_remote_cli_version",
-    level: "info",
-    message: "Remote Codex CLI diagnostic completed.",
-    detail: `path=${facts.codex_path ?? "unknown"}; version=${facts.codex_version ?? "unknown"}`,
-  });
-  input.checks.push({
-    code: "codex_remote_auth_mode",
-    level: "info",
-    message: facts.auth_mode === "chatgpt"
-      ? "Remote Codex auth is ChatGPT subscription mode."
-      : "Remote Codex auth mode was detected.",
-    detail: `auth_mode=${facts.auth_mode ?? "unknown"}; auth_keys=${facts.auth_keys ?? "unknown"}`,
-    ...(facts.auth_mode === "chatgpt"
-      ? {
-          hint: "ChatGPT-mode Codex auth copied from another machine may require an interactive refresh inside the sandbox.",
-        }
-      : {}),
-  });
-  input.checks.push({
-    code: "codex_remote_exec_help",
-    level: facts.exec_help ? "info" : "warn",
-    message: facts.exec_help ? "Remote `codex exec --help` returned." : "Remote `codex exec --help` returned no output.",
-    ...(facts.exec_help ? { detail: facts.exec_help.slice(0, 240) } : {}),
-  });
-  return {
-    authMode: facts.auth_mode ?? null,
-  };
-}
-
-async function addRemoteCodexProviderDiagnostics(input: {
-  checks: AdapterEnvironmentCheck[];
-  runId: string;
-  target: AdapterEnvironmentTestContext["executionTarget"] | null;
-  cwd: string;
-  env: Record<string, string>;
-}): Promise<{
-  baseUrl: string | null;
-  tcp: string | null;
-  http: string | null;
-  requiresOpenaiAuth: boolean | null;
-  hasBearerToken: boolean | null;
-} | null> {
-  const codexHome = input.env.CODEX_HOME?.trim();
-  if (!codexHome || !input.target || input.target.kind !== "remote") return null;
-
-  const probe = await runAdapterExecutionTargetShellCommand(
-    input.runId,
-    input.target,
-    [
-      "if command -v tailscale >/dev/null 2>&1; then",
-      "  tailscale_ip=$(tailscale ip -4 2>/dev/null | head -n 1 || true)",
-      "  tailscale_status=$(tailscale status 2>&1 | head -n 1 || true)",
-      "  printf \"tailscale_ip=%s\\n\" \"$tailscale_ip\"",
-      "  printf \"tailscale_status=%s\\n\" \"$tailscale_status\"",
-      "else",
-      "  printf \"tailscale_ip=missing_cli\\n\"",
-      "  printf \"tailscale_status=missing_cli\\n\"",
-      "fi",
-      "node <<'NODE'",
-      "const { spawnSync } = require('child_process');",
-      "const fs = require('fs');",
-      "const net = require('net');",
-      "(async () => {",
-      "const cfg = fs.readFileSync(`${process.env.CODEX_HOME}/config.toml`, 'utf8');",
-      "const readTop = (key) => (cfg.match(new RegExp(`^${key}\\\\s*=\\\\s*\"([^\"]*)\"`, 'm')) || [])[1] || '';",
-      "const provider = readTop('model_provider');",
-      "const escapedProvider = provider.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');",
-      "const section = provider ? (cfg.match(new RegExp(`\\\\[model_providers\\\\.${escapedProvider}\\\\]([\\\\s\\\\S]*?)(?:\\\\n\\\\[|$)`)) || [])[1] || '' : '';",
-      "const readSection = (key) => (section.match(new RegExp(`^${key}\\\\s*=\\\\s*\"([^\"]*)\"`, 'm')) || [])[1] || '';",
-      "const base = readSection('base_url');",
-      "const wire = readSection('wire_api');",
-      "const requiresOpenaiAuth = /^\\s*requires_openai_auth\\s*=\\s*true/m.test(section);",
-      "const hasBearerToken = /^\\s*experimental_bearer_token\\s*=\\s*\"/m.test(section) || /^\\s*env_key\\s*=\\s*\"/m.test(section);",
-      "console.log(`model_provider=${provider}`);",
-      "console.log(`provider_base_url=${base}`);",
-      "console.log(`provider_wire_api=${wire}`);",
-      "console.log(`provider_requires_openai_auth=${requiresOpenaiAuth}`);",
-      "console.log(`provider_has_bearer_token=${hasBearerToken}`);",
-      "if (!base) { console.log('provider_tcp=skipped'); console.log('provider_http=skipped'); process.exit(0); }",
-      "let url;",
-      "try { url = new URL(base); } catch { console.log('provider_tcp=invalid_url'); console.log('provider_http=invalid_url'); process.exit(0); }",
-      "const port = Number(url.port || (url.protocol === 'https:' ? 443 : 80));",
-      "const tcp = await new Promise((resolve) => {",
-      "  const socket = net.createConnection({ host: url.hostname, port, timeout: 5000 });",
-      "  let done = false;",
-      "  const finish = (value) => { if (done) return; done = true; socket.destroy(); resolve(value); };",
-      "  socket.on('connect', () => finish('connect'));",
-      "  socket.on('timeout', () => finish('timeout'));",
-      "  socket.on('error', (error) => finish(`error:${error.code}`));",
-      "});",
-      "console.log(`provider_tcp=${tcp}`);",
-      "const modelsUrl = new URL(base);",
-      "modelsUrl.pathname = `${modelsUrl.pathname.replace(/\\/+$/, '')}/models`;",
-      "const curl = spawnSync('curl', ['-sS', '-o', '/dev/null', '-w', '%{http_code}', '--max-time', '8', modelsUrl.toString()], {",
-      "  encoding: 'utf8',",
-      "  env: process.env,",
-      "});",
-      "if (curl.error && curl.error.code === 'ENOENT') {",
-      "  console.log('provider_http=missing_curl');",
-      "} else if (curl.status === 0) {",
-      "  console.log(`provider_http=status:${String(curl.stdout || '').trim() || '000'}`);",
-      "} else {",
-      "  const stderr = String(curl.stderr || '').replace(/\\s+/g, ' ').trim().slice(0, 120);",
-      "  console.log(`provider_http=error:${curl.status}${stderr ? `:${stderr}` : ''}`);",
-      "}",
-      "})().catch((error) => {",
-      "  console.log(`provider_diagnostic_error=${String(error && error.message ? error.message : error).replace(/\\s+/g, ' ').slice(0, 200)}`);",
-      "  process.exitCode = 1;",
-      "});",
-      "NODE",
-    ].join("\n"),
-    {
-      cwd: input.cwd,
-      env: input.env,
-      timeoutSec: 20,
-      graceSec: 5,
-      onLog: async () => {},
-    },
-  ).catch((error) => ({
-    exitCode: 1,
-    signal: null,
-    timedOut: false,
-    stdout: "",
-    stderr: error instanceof Error ? error.message : String(error),
-    pid: null,
-    startedAt: new Date().toISOString(),
-  }));
-
-  if (probe.timedOut) {
-    input.checks.push({
-      code: "codex_remote_provider_diagnostic_timed_out",
-      level: "warn",
-      message: "Timed out checking remote Codex model provider connectivity.",
-    });
-    return null;
-  }
-
-  if ((probe.exitCode ?? 1) !== 0) {
-    input.checks.push({
-      code: "codex_remote_provider_diagnostic_failed",
-      level: "warn",
-      message: "Could not inspect remote Codex model provider configuration.",
-      detail: summarizeProbeDetail(probe.stdout, probe.stderr, null) ?? undefined,
-    });
-    return null;
-  }
-
-  const facts = parseKeyValueLines(probe.stdout);
-  const tcp = facts.provider_tcp ?? "unknown";
-  const http = facts.provider_http ?? "unknown";
-  const httpReachable = /^status:(?!000)/.test(http);
-  const providerReachable = tcp === "connect" || httpReachable;
-  const tailscaleIp = facts.tailscale_ip ?? "unknown";
-  const tailscaleStatus = facts.tailscale_status ?? "unknown";
-  input.checks.push({
-    code: "codex_remote_tailscale_status",
-    level: tailscaleIp && tailscaleIp !== "missing_cli" ? "info" : "warn",
-    message: tailscaleIp && tailscaleIp !== "missing_cli"
-      ? "Remote sandbox Tailscale status was detected."
-      : "Remote sandbox Tailscale status could not be detected.",
-    detail: `tailscale_ip=${tailscaleIp}; status=${tailscaleStatus}`,
-    ...(tailscaleIp && tailscaleIp !== "missing_cli"
-      ? {}
-      : {
-          hint: "Install Tailscale in the sandbox image and set TAILSCALE_AUTHKEY on the Cloudflare Worker.",
-        }),
-  });
-  input.checks.push({
-    code: "codex_remote_model_provider",
-    level: "info",
-    message: "Remote Codex model provider configuration was detected.",
-    detail: `model_provider=${facts.model_provider ?? "unknown"}; base_url=${facts.provider_base_url ?? "unknown"}; wire_api=${facts.provider_wire_api ?? "unknown"}; requires_openai_auth=${facts.provider_requires_openai_auth ?? "unknown"}; bearer_token=${facts.provider_has_bearer_token === "true" ? "present" : facts.provider_has_bearer_token === "false" ? "absent" : "unknown"}`,
-  });
-  input.checks.push({
-    code: "codex_remote_model_provider_connectivity",
-    level: providerReachable ? "info" : "warn",
-    message: providerReachable
-      ? "Remote sandbox can reach the configured Codex model provider."
-      : "Remote sandbox could not confirm connectivity to the configured Codex model provider.",
-    detail: `provider_tcp=${tcp}; provider_http=${http}`,
-    ...(providerReachable
-      ? {}
-      : {
-          hint: "If your provider base_url points at a local/Tailscale proxy, the remote sandbox must be able to reach that network address too.",
-        }),
-  });
-  return {
-    baseUrl: facts.provider_base_url ?? null,
-    tcp,
-    http,
-    requiresOpenaiAuth:
-      facts.provider_requires_openai_auth === "true"
-        ? true
-        : facts.provider_requires_openai_auth === "false"
-          ? false
-          : null,
-    hasBearerToken:
-      facts.provider_has_bearer_token === "true"
-        ? true
-        : facts.provider_has_bearer_token === "false"
-          ? false
-          : null,
-  };
-}
+  /(?:not\s+logged\s+in|login\s+required|authentication\s+required|unauthorized|invalid(?:\s+or\s+missing)?\s+api(?:[_\s-]?key)?|openai[_\s-]?api[_\s-]?key|api[_\s-]?key.*required|please\s+run\s+`?codex\s+login`?)/i;
 
 async function prepareCodexHelloProbe(input: {
   runId: string;
@@ -693,146 +316,30 @@ export async function testEnvironment(
         probeApiKey,
       });
       try {
-        await addRemoteCodexHomeDiagnostics({
-          checks,
+        const probe = await runAdapterExecutionTargetProcess(
           runId,
           target,
-          cwd,
-          env: preparedProbe.env,
-        });
-        const cliDiagnostics = await addRemoteCodexCliDiagnostics({
-          checks,
-          runId,
-          target,
-          cwd,
-          command: preparedProbe.command,
-          env: preparedProbe.env,
-        });
-        const providerConnectivity = await addRemoteCodexProviderDiagnostics({
-          checks,
-          runId,
-          target,
-          cwd,
-          env: preparedProbe.env,
-        });
-        const providerBaseUrl = providerConnectivity?.baseUrl?.trim() ?? "";
-        const providerTcp = providerConnectivity?.tcp?.trim() ?? "";
-        const providerHttp = providerConnectivity?.http?.trim() ?? "";
-        const providerReachable = providerTcp === "connect" || /^status:(?!000)/.test(providerHttp);
-        // When the provider does not require OpenAI auth (e.g. a proxy like
-        // cliproxyapi authenticated by its own bearer token), the copied
-        // ChatGPT subscription token is irrelevant — Codex authenticates to the
-        // provider with the configured bearer token. In that case we want to
-        // actually run the hello probe to prove the end-to-end path, rather than
-        // skipping it just because auth.json happens to be in ChatGPT mode.
-        const providerRequiresOpenaiAuth = providerConnectivity?.requiresOpenaiAuth ?? true;
-        if (
-          targetIsSandbox
-          && providerBaseUrl.length > 0
-          && providerReachable
-          && cliDiagnostics?.authMode === "chatgpt"
-          && providerRequiresOpenaiAuth
-          && !probeApiKey
-        ) {
-          checks.push({
-            code: "codex_hello_probe_skipped_chatgpt_remote",
-            level: "warn",
-            message: "Skipped Codex hello probe for ChatGPT-mode auth in a remote sandbox.",
-            detail: `base_url=${providerBaseUrl}; provider_tcp=${providerTcp || "unknown"}; provider_http=${providerHttp || "unknown"}`,
-            hint: "The sandbox, Tailscale, Codex CLI, copied Codex home, and model provider are reachable. ChatGPT subscription tokens can require an interactive refresh, so the full conversation probe is left to an actual run instead of blocking this test.",
-          });
-          return {
-            adapterType: ctx.adapterType,
-            status: summarizeStatus(checks),
-            checks,
-            testedAt: new Date().toISOString(),
-          };
-        }
-        if (targetIsSandbox && providerBaseUrl.length > 0 && !providerReachable) {
-          checks.push({
-            code: "codex_hello_probe_skipped_provider_unreachable",
-            level: "warn",
-            message: "Skipped Codex hello probe because the sandbox cannot reach the configured model provider.",
-            detail: `base_url=${providerBaseUrl}; provider_tcp=${providerTcp || "unknown"}; provider_http=${providerHttp || "unknown"}`,
-            hint: "Fix Tailscale/ACL/firewall access from the sandbox to the Codex model provider, then retry the adapter test.",
-          });
-          return {
-            adapterType: ctx.adapterType,
-            status: summarizeStatus(checks),
-            checks,
-            testedAt: new Date().toISOString(),
-          };
-        }
-        checks.push({
-          code: "codex_hello_probe_invocation",
-          level: "info",
-          message: "Running Codex hello probe.",
-          detail: [preparedProbe.command, ...preparedProbe.args].join(" "),
-          ...(targetIsSandbox
-            ? {
-                hint: `Remote sandbox hello probes are capped at ${SANDBOX_HELLO_PROBE_TIMEOUT_SEC}s so the environment test can return diagnostics instead of timing out.`,
-              }
-            : {}),
-        });
-        let probe: Awaited<ReturnType<typeof runAdapterExecutionTargetProcess>>;
-        try {
-          probe = await runAdapterExecutionTargetProcess(
-            runId,
-            target,
-            preparedProbe.command,
-            preparedProbe.args,
-            {
-              cwd,
-              env: preparedProbe.env,
-              timeoutSec: targetIsSandbox ? SANDBOX_HELLO_PROBE_TIMEOUT_SEC : 45,
-              graceSec: 5,
-              stdin: "Respond with hello.",
-              onLog: async () => {},
-            },
-          );
-        } catch (err) {
-          // The probe transport (e.g. the plugin RPC) can fail or time out
-          // independently of the Codex process — surface it as a warning rather
-          // than letting it bubble up as an opaque 500 from the environment test.
-          checks.push({
-            code: "codex_hello_probe_transport_error",
-            level: "warn",
-            message: "Could not complete the Codex hello probe in the remote sandbox.",
-            detail: (err instanceof Error ? err.message : String(err)).slice(0, 240),
-            hint: targetIsSandbox
-              ? "The cold sandbox can take 1-2 minutes for the first `codex exec`. The diagnostics above already confirm the sandbox, Tailscale, Codex CLI, copied config, and model provider; retry the test once the sandbox is warm, or start a real run to confirm."
-              : "Retry the probe. If this persists, run `codex exec --json -` manually to debug.",
-          });
-          return {
-            adapterType: ctx.adapterType,
-            status: summarizeStatus(checks),
-            checks,
-            testedAt: new Date().toISOString(),
-          };
-        }
+          preparedProbe.command,
+          preparedProbe.args,
+          {
+            cwd,
+            env: preparedProbe.env,
+            timeoutSec: 45,
+            graceSec: 5,
+            stdin: "Respond with hello.",
+            onLog: async () => {},
+          },
+        );
         const parsed = parseCodexJsonl(probe.stdout);
         const detail = summarizeProbeDetail(probe.stdout, probe.stderr, parsed.errorMessage);
         const authEvidence = `${parsed.errorMessage ?? ""}\n${probe.stdout}\n${probe.stderr}`.trim();
 
-        if (CODEX_AUTH_REQUIRED_RE.test(authEvidence)) {
-          checks.push({
-            code: "codex_hello_probe_auth_required",
-            level: "warn",
-            message: "Codex CLI is installed, but authentication is not ready.",
-            ...(detail ? { detail } : {}),
-            hint: probeApiKey
-              ? "OPENAI_API_KEY was provided but Codex still rejected the request. Verify the key is valid for the OpenAI Responses API (e.g. `curl -H \"Authorization: Bearer $OPENAI_API_KEY\" https://api.openai.com/v1/models`), or run `codex login` and seed `~/.codex/auth.json`."
-              : "Refresh Codex login on the Paperclip host, then retry. ChatGPT-mode Codex auth copied into a remote sandbox can stop working when the token is invalidated.",
-          });
-        } else if (probe.timedOut) {
+        if (probe.timedOut) {
           checks.push({
             code: "codex_hello_probe_timed_out",
             level: "warn",
             message: "Codex hello probe timed out.",
-            ...(detail ? { detail } : {}),
-            hint: targetIsSandbox
-              ? "The sandbox reached the model provider, but Codex did not finish the hello probe quickly enough. If this follows a login refresh, retry once; otherwise run `codex login` on the Paperclip host and retry."
-              : "Retry the probe. If this persists, verify Codex can run `Respond with hello` from this directory manually.",
+            hint: "Retry the probe. If this persists, verify Codex can run `Respond with hello` from this directory manually.",
           });
         } else if ((probe.exitCode ?? 1) === 0) {
           const summary = parsed.summary.trim();
@@ -849,6 +356,16 @@ export async function testEnvironment(
               : {
                   hint: "Try the probe manually (`codex exec --json -` then prompt: Respond with hello) to inspect full output.",
                 }),
+          });
+        } else if (CODEX_AUTH_REQUIRED_RE.test(authEvidence)) {
+          checks.push({
+            code: "codex_hello_probe_auth_required",
+            level: "warn",
+            message: "Codex CLI is installed, but authentication is not ready.",
+            ...(detail ? { detail } : {}),
+            hint: probeApiKey
+              ? "OPENAI_API_KEY was provided but Codex still rejected the request. Verify the key is valid for the OpenAI Responses API (e.g. `curl -H \"Authorization: Bearer $OPENAI_API_KEY\" https://api.openai.com/v1/models`), or run `codex login` and seed `~/.codex/auth.json`."
+              : "Codex CLI does not read OPENAI_API_KEY from the environment; set OPENAI_API_KEY in this adapter's config (so Paperclip writes it to `$CODEX_HOME/auth.json`) or run `codex login` on the host first.",
           });
         } else {
           checks.push({
