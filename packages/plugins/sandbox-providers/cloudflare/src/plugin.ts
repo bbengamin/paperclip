@@ -81,13 +81,27 @@ function resolveRemoteCwd(
   return leaseRemoteCwd ?? params.workspace.remotePath ?? params.workspace.localPath ?? config.requestedCwd;
 }
 
+// Bridge-channel commands (queue polling, response writes, alive pings) run on
+// a dedicated session so they are isolated from the long-lived adapter command
+// (the Codex exec). This matters because `executeInSandbox` deletes the *named
+// session* when a command times out: if the bridge polled on the same session
+// as the running Codex exec, a single slow poll would tear down the Codex
+// session and kill an otherwise-healthy run. A separate session also prevents
+// bridge traffic from serializing behind the long exec.
+const BRIDGE_SESSION_SUFFIX = "-bridge";
+
 function resolveExecuteSession(
   config: ReturnType<typeof parseCloudflareDriverConfig>,
-  _env: Record<string, string> | undefined,
+  env: Record<string, string> | undefined,
 ) {
+  const isBridgeChannel = env?.[SANDBOX_EXEC_CHANNEL_ENV] === SANDBOX_EXEC_CHANNEL_BRIDGE;
+  const sessionId =
+    isBridgeChannel && config.sessionStrategy === "named"
+      ? `${config.sessionId}${BRIDGE_SESSION_SUFFIX}`
+      : config.sessionId;
   return {
     sessionStrategy: config.sessionStrategy,
-    sessionId: config.sessionId,
+    sessionId,
   } as const;
 }
 

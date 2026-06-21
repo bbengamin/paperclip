@@ -340,6 +340,7 @@ export async function handleBridgeRequest(request: Request, env: BridgeEnv): Pro
       runId: body.runId,
       reuseLease,
       normalizeId,
+      issueId: body.issueId ?? null,
     });
     const sandbox = await resolveSandbox(env, providerLeaseId, { keepAlive, sleepAfter, normalizeId });
     // Guard against orphaning a keepAlive sandbox if workspace setup throws

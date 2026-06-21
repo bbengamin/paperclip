@@ -289,6 +289,54 @@ describe("Cloudflare sandbox provider plugin", () => {
     expect(requestBodyAt().streamOutput).toBe(false);
   });
 
+  it("isolates named-session bridge-channel calls onto a dedicated bridge session", async () => {
+    // With the named-session strategy (the production default), bridge-channel
+    // traffic must run on a separate `<sessionId>-bridge` session. The Cloudflare
+    // worker deletes the named session when a command times out, so sharing the
+    // session with the long-lived Codex exec would let a slow bridge poll tear
+    // down a healthy run.
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse({ exitCode: 0, signal: null, timedOut: false, stdout: "ok\n", stderr: "" }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({ exitCode: 0, signal: null, timedOut: false, stdout: "ok\n", stderr: "" }),
+      );
+
+    const baseConfig = {
+      bridgeBaseUrl: "https://bridge.example.workers.dev",
+      bridgeAuthToken: "resolved-token",
+      sessionStrategy: "named" as const,
+      sessionId: "paperclip",
+    };
+
+    await plugin.definition.onEnvironmentExecute?.({
+      driverKey: "cloudflare",
+      companyId: "company-1",
+      environmentId: "env-1",
+      lease: { providerLeaseId: "pc-run-1-abcd1234", metadata: {} },
+      command: "sh",
+      args: ["-lc", "ls"],
+      cwd: "/workspace/paperclip",
+      env: { PAPERCLIP_SANDBOX_EXEC_CHANNEL: "bridge" },
+      config: baseConfig,
+    });
+    expect(requestBodyAt(0)).toMatchObject({ sessionStrategy: "named", sessionId: "paperclip-bridge" });
+
+    await plugin.definition.onEnvironmentExecute?.({
+      driverKey: "cloudflare",
+      companyId: "company-1",
+      environmentId: "env-1",
+      lease: { providerLeaseId: "pc-run-1-abcd1234", metadata: {} },
+      command: "codex",
+      args: ["exec"],
+      cwd: "/workspace/paperclip",
+      env: {},
+      config: baseConfig,
+    });
+    expect(requestBodyAt(1).sessionId).toBe("paperclip");
+  });
+
   it("uses streaming exec for non-bridge adapter commands so live logs flow", async () => {
     // Streaming is gated on `pluginLogger` being set, which normally happens
     // in `setup()`. Wire a minimal logger so the streaming branch is reachable.

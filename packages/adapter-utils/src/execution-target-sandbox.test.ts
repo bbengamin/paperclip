@@ -525,6 +525,84 @@ describe("sandbox adapter execution targets", () => {
     }
   });
 
+  it("reports same-run issue disposition updates to the adapter callback", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-execution-target-bridge-issue-disposition-"));
+    cleanupDirs.push(rootDir);
+    const remoteCwd = path.join(rootDir, "workspace");
+    const runtimeRootDir = path.join(remoteCwd, ".paperclip-runtime", "codex");
+    await mkdir(runtimeRootDir, { recursive: true });
+
+    const apiServer = createServer((req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        id: "issue-1",
+        key: "LOC-48",
+        status: "blocked",
+        updatedAt: "2026-06-20T14:23:59.000Z",
+      }));
+    });
+    await new Promise<void>((resolve, reject) => {
+      apiServer.once("error", reject);
+      apiServer.listen(0, "127.0.0.1", () => resolve());
+    });
+    const address = apiServer.address();
+    if (!address || typeof address === "string") {
+      throw new Error("Expected the bridge issue disposition test API server to listen on a TCP port.");
+    }
+
+    const activities: unknown[] = [];
+    const target: AdapterSandboxExecutionTarget = {
+      kind: "remote",
+      transport: "sandbox",
+      providerKey: "cloudflare",
+      environmentId: "env-1",
+      leaseId: "lease-1",
+      remoteCwd,
+      runner: createLocalSandboxRunner(),
+      timeoutMs: 30_000,
+    };
+
+    const bridge = await startAdapterExecutionTargetPaperclipBridge({
+      runId: "run-issue-disposition",
+      target,
+      runtimeRootDir,
+      adapterKey: "codex",
+      hostApiToken: "real-run-jwt",
+      hostApiUrl: `http://127.0.0.1:${address.port}`,
+      onActivity: async (activity) => {
+        activities.push(activity);
+      },
+    });
+    try {
+      const response = await fetch(`${bridge!.env.PAPERCLIP_API_URL}/api/issues/issue-1`, {
+        method: "PATCH",
+        headers: {
+          authorization: `Bearer ${bridge!.env.PAPERCLIP_API_KEY}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ status: "blocked" }),
+      });
+
+      expect(response.status).toBe(200);
+      expect(activities).toEqual([expect.objectContaining({
+        runId: "run-issue-disposition",
+        source: "paperclip_issue",
+        status: "terminal:blocked",
+        message: "Issue LOC-48 marked blocked",
+        at: "2026-06-20T14:23:59.000Z",
+        payload: expect.objectContaining({
+          issueId: "issue-1",
+          issueKey: "LOC-48",
+          status: "blocked",
+          updatedAt: "2026-06-20T14:23:59.000Z",
+        }),
+      })]);
+    } finally {
+      await bridge?.stop();
+      await new Promise<void>((resolve) => apiServer.close(() => resolve()));
+    }
+  });
+
   it("uses the effective adapter timeout when starting the sandbox callback bridge", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-execution-target-bridge-timeout-"));
     cleanupDirs.push(rootDir);

@@ -35,6 +35,7 @@ import {
   documentAnnotationComments,
   documentAnnotationThreads,
   documentRevisions,
+  environmentLeases,
   issueDocuments,
   heartbeatRunEvents,
   heartbeatRuns,
@@ -7401,8 +7402,74 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         });
       }
 
-      const shouldRetry = tracksLocalChild && (!!run.processPid || !!run.processGroupId) && (run.processLossRetryCount ?? 0) < 1;
-      const baseMessage = buildProcessLossMessage(run, descendantOnlyCleanup ? { descendantOnly: true } : undefined);
+      // Environment-backed runs (sandbox / SSH provider leases) have no local
+      // child PID to probe, so PID/process-group liveness never applies. A run
+      // is "environment-backed" when it holds (or held) a provider lease keyed
+      // by this run id. These runs report liveness through the in-sandbox
+      // callback bridge ("run alive" pings that bump updatedAt) rather than a
+      // local process handle.
+      const isEnvironmentBacked =
+        !tracksLocalChild &&
+        (await db
+          .select({ id: environmentLeases.id })
+          .from(environmentLeases)
+          .where(eq(environmentLeases.heartbeatRunId, run.id))
+          .limit(1)
+          .then((rows) => rows.length > 0));
+
+      // Guard against a race for environment-backed runs: an in-sandbox liveness
+      // ping may have landed between the activeRuns snapshot and now, bumping
+      // updatedAt. For periodic reaps (staleThresholdMs > 0) re-read the latest
+      // state and skip if the run is no longer running or has produced a
+      // liveness signal within the window.
+      if (isEnvironmentBacked && staleThresholdMs > 0) {
+        const latest = await db
+          .select({ updatedAt: heartbeatRuns.updatedAt, status: heartbeatRuns.status })
+          .from(heartbeatRuns)
+          .where(eq(heartbeatRuns.id, run.id))
+          .limit(1)
+          .then((rows) => rows[0] ?? null);
+        if (!latest || latest.status !== "running") continue;
+        const latestRefTime = latest.updatedAt ? new Date(latest.updatedAt).getTime() : 0;
+        if (Date.now() - latestRefTime < staleThresholdMs) continue;
+      }
+
+      // Finalization wins over stale-reap: if the agent already drove the
+      // linked issue to a terminal-good status (done / in_review / cancelled)
+      // through the callback bridge before liveness lapsed, the run's work is
+      // effectively complete — re-waking it would redundantly re-run a finished
+      // task, so suppress the auto-retry for those.
+      let linkedIssueTerminalGood = false;
+      if (isEnvironmentBacked) {
+        const linkedIssueId = readNonEmptyString(parseObject(run.contextSnapshot).issueId);
+        if (linkedIssueId) {
+          const linkedIssue = await db
+            .select({ status: issues.status })
+            .from(issues)
+            .where(and(eq(issues.companyId, run.companyId), eq(issues.id, linkedIssueId)))
+            .limit(1)
+            .then((rows) => rows[0] ?? null);
+          linkedIssueTerminalGood =
+            linkedIssue?.status === "done" ||
+            linkedIssue?.status === "in_review" ||
+            linkedIssue?.status === "cancelled";
+        }
+      }
+
+      // Allow a single automatic retry for environment-backed runs as well: the
+      // sandbox may have slept or the callback bridge stalled while the agent
+      // was still making progress, so re-waking the issue lets it resume on a
+      // (re-acquired or resumed) lease instead of stranding the task as a hard
+      // failure. Skip the retry when the linked issue is already terminal-good.
+      const shouldRetry =
+        ((tracksLocalChild && (!!run.processPid || !!run.processGroupId)) ||
+          (isEnvironmentBacked && !linkedIssueTerminalGood)) &&
+        (run.processLossRetryCount ?? 0) < 1;
+      const baseMessage = isEnvironmentBacked
+        ? linkedIssueTerminalGood
+          ? "Run lost liveness contact with its sandbox/remote environment after the linked issue already reached a terminal status; not retrying"
+          : "Run lost liveness contact with its sandbox/remote environment (no \"run alive\" signal within the watchdog window); the sandbox may have slept or the callback bridge stalled"
+        : buildProcessLossMessage(run, descendantOnlyCleanup ? { descendantOnly: true } : undefined);
 
       let finalizedRun = await setRunStatus(run.id, "failed", {
         error: shouldRetry ? `${baseMessage}; retrying once` : baseMessage,

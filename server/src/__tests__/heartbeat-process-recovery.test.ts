@@ -1034,6 +1034,59 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(lease?.releasedAt).toBeTruthy();
   });
 
+  it("queues one retry for an orphaned environment-backed run with a sandbox-aware reason", async () => {
+    // Sandbox/remote adapters have no local child pid; liveness flows through
+    // the callback bridge. When that lapses the watchdog must not report a fake
+    // "server may have restarted" loss, and must allow one recovery retry so
+    // the issue resumes instead of stranding.
+    const { agentId, runId, issueId, companyId } = await seedRunFixture({
+      adapterType: "codex_remote",
+      agentStatus: "idle",
+    });
+    await seedEnvironmentLeaseFixture({ companyId, runId, issueId, provider: "cloudflare" });
+    const heartbeat = heartbeatService(db);
+
+    const result = await heartbeat.reapOrphanedRuns();
+    expect(result.reaped).toBe(1);
+    expect(result.runIds).toEqual([runId]);
+
+    const runs = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.agentId, agentId));
+    const failedRun = runs.find((row) => row.id === runId);
+    const retryRuns = runs.filter((row) => row.retryOfRunId === runId);
+    expect(failedRun?.status).toBe("failed");
+    expect(failedRun?.errorCode).toBe("process_lost");
+    expect(failedRun?.error).toContain("lost liveness contact");
+    expect(failedRun?.error).not.toContain("server may have restarted");
+    expect(retryRuns).toHaveLength(1);
+    expect(retryRuns[0]?.processLossRetryCount).toBe(1);
+  });
+
+  it("does not retry an orphaned environment-backed run whose linked issue already reached a terminal status", async () => {
+    const { agentId, runId, issueId, companyId } = await seedRunFixture({
+      adapterType: "codex_remote",
+      agentStatus: "idle",
+    });
+    await seedEnvironmentLeaseFixture({ companyId, runId, issueId, provider: "cloudflare" });
+    await db.update(issues).set({ status: "done" }).where(eq(issues.id, issueId));
+    const heartbeat = heartbeatService(db);
+
+    const result = await heartbeat.reapOrphanedRuns();
+    expect(result.reaped).toBe(1);
+
+    const runs = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.agentId, agentId));
+    const failedRun = runs.find((row) => row.id === runId);
+    const retryRuns = runs.filter((row) => row.retryOfRunId === runId);
+    expect(failedRun?.status).toBe("failed");
+    expect(failedRun?.error).toContain("already reached a terminal status");
+    expect(retryRuns).toHaveLength(0);
+  });
+
   it.skipIf(process.platform === "win32")("reaps orphaned descendant process groups when the parent pid is already gone", async () => {
     const orphan = await spawnOrphanedProcessGroup();
     cleanupPids.add(orphan.descendantPid);

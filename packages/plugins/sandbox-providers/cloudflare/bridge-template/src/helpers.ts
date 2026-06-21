@@ -7,15 +7,42 @@ export function normalizeLeaseIdPart(input: string): string {
     .replace(/-{2,}/g, "-");
 }
 
+// Deterministic, dependency-free FNV-1a 32-bit hash rendered as 8 hex chars.
+// Used to derive a short, stable per-issue discriminator for reusable sandbox
+// ids so they never approach Cloudflare's 63-character sandbox-id limit (an
+// env UUID + a full issue UUID would be ~86 chars and is rejected).
+function shortStableToken(input: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < input.length; i += 1) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
 export function buildLeaseSandboxId(input: {
   environmentId: string;
   runId: string;
   reuseLease: boolean;
   normalizeId: boolean;
+  issueId?: string | null;
   randomId?: string;
 }): string {
+  // Reusable leases are keyed per-issue when an issue id is present so that
+  // different issues never land on the same physical sandbox (and thus never
+  // share a `/workspace` checkout). A warm sandbox is only reused for the same
+  // issue (fast continuation: comment / approval / unblock) within the sleep
+  // window. Reuse without an issue id (e.g. ad-hoc) stays environment-scoped
+  // for backwards compatibility.
+  //
+  // The issue discriminator is a short stable hash (not the raw issue id) so
+  // the final sandbox id stays within Cloudflare's 1-63 character limit while
+  // remaining deterministic per (environment, issue).
+  const issuePart = input.issueId && input.issueId.trim().length > 0 ? input.issueId.trim() : null;
   const base = input.reuseLease
-    ? `pc-env-${input.environmentId}`
+    ? issuePart
+      ? `pc-env-${input.environmentId}-i-${shortStableToken(issuePart)}`
+      : `pc-env-${input.environmentId}`
     : `pc-${input.runId}-${input.randomId ?? crypto.randomUUID().slice(0, 8)}`;
   return input.normalizeId ? normalizeLeaseIdPart(base) : base;
 }

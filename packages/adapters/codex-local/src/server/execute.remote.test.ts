@@ -12,7 +12,9 @@ const {
   syncDirectoryToSsh,
   startAdapterExecutionTargetPaperclipBridge,
   prepareAdapterExecutionTargetRuntimeMock,
+  ensureAdapterExecutionTargetCommandResolvableMock,
   runAdapterExecutionTargetShellCommand,
+  runAdapterExecutionTargetProcessMock,
 } = vi.hoisted(() => ({
   runChildProcess: vi.fn(async () => ({
     exitCode: 1,
@@ -37,6 +39,8 @@ const {
     stop: async () => {},
   })),
   prepareAdapterExecutionTargetRuntimeMock: vi.fn(),
+  ensureAdapterExecutionTargetCommandResolvableMock: vi.fn(),
+  runAdapterExecutionTargetProcessMock: vi.fn(),
   runAdapterExecutionTargetShellCommand: vi.fn(async () => ({
     exitCode: 0,
     signal: null,
@@ -80,6 +84,12 @@ vi.mock("@paperclipai/adapter-utils/execution-target", async () => {
     ...actual,
     prepareAdapterExecutionTargetRuntime: prepareAdapterExecutionTargetRuntimeMock.mockImplementation(
       actual.prepareAdapterExecutionTargetRuntime,
+    ),
+    ensureAdapterExecutionTargetCommandResolvable: ensureAdapterExecutionTargetCommandResolvableMock.mockImplementation(
+      actual.ensureAdapterExecutionTargetCommandResolvable,
+    ),
+    runAdapterExecutionTargetProcess: runAdapterExecutionTargetProcessMock.mockImplementation(
+      actual.runAdapterExecutionTargetProcess,
     ),
     runAdapterExecutionTargetShellCommand,
     startAdapterExecutionTargetPaperclipBridge,
@@ -421,6 +431,136 @@ describe("codex remote execution", () => {
     expect(waitingChunks).toHaveLength(1);
     expect(waitingChunks[0]?.chunk).toContain('"type":"agent_message"');
   });
+
+  it("finalizes a sandbox run when the issue is marked terminal through the bridge and Codex keeps running", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-remote-terminal-"));
+    cleanupDirs.push(rootDir);
+    const workspaceDir = path.join(rootDir, "workspace");
+    const codexHomeDir = path.join(rootDir, "codex-home");
+    await mkdir(workspaceDir, { recursive: true });
+    await mkdir(codexHomeDir, { recursive: true });
+    await writeFile(path.join(codexHomeDir, "config.toml"), "model = \"gpt-5\"\n", "utf8");
+
+    const sandboxTarget = {
+      kind: "remote" as const,
+      transport: "sandbox" as const,
+      providerKey: "cloudflare",
+      environmentId: "env-1",
+      leaseId: "lease-1",
+      remoteCwd: "/workspace/paperclip",
+      timeoutMs: 30_000,
+      runner: {
+        execute: vi.fn(async () => ({
+          exitCode: 0,
+          signal: null,
+          timedOut: false,
+          stdout: "",
+          stderr: "",
+          pid: null,
+          startedAt: new Date().toISOString(),
+        })),
+      },
+    };
+
+    prepareAdapterExecutionTargetRuntimeMock.mockImplementationOnce(async (input: {
+      target: typeof sandboxTarget;
+    }) => ({
+      target: input.target,
+      workspaceRemoteDir: "/workspace/paperclip",
+      runtimeRootDir: "/workspace/paperclip/.paperclip-runtime/codex",
+      assetDirs: {
+        home: "/workspace/paperclip/.paperclip-runtime/codex/home",
+      },
+      restoreWorkspace: async () => {},
+    }));
+    ensureAdapterExecutionTargetCommandResolvableMock.mockResolvedValueOnce(undefined);
+    runAdapterExecutionTargetProcessMock.mockImplementationOnce(async (...args: unknown[]) => {
+      const options = args[4] as {
+        onLog?: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
+      };
+      await options.onLog?.(
+        "stdout",
+        `${JSON.stringify({
+          type: "item.completed",
+          item: {
+            id: "item_1",
+            type: "agent_message",
+            text: "Blocked before implementation.",
+          },
+        })}\n`,
+      );
+      return await new Promise<never>(() => {});
+    });
+
+    const chunks: Array<{ stream: "stdout" | "stderr"; chunk: string }> = [];
+    const resultPromise = execute({
+      runId: "run-terminal",
+      agent: {
+        id: "agent-1",
+        companyId: "company-1",
+        name: "CodexCoder",
+        adapterType: "codex_local",
+        adapterConfig: {},
+      },
+      runtime: {
+        sessionId: null,
+        sessionParams: null,
+        sessionDisplayId: null,
+        taskKey: null,
+      },
+      config: {
+        command: "codex",
+        env: {
+          CODEX_HOME: codexHomeDir,
+        },
+      },
+      context: {
+        taskId: "issue-1",
+        paperclipWorkspace: {
+          cwd: workspaceDir,
+          source: "project_primary",
+        },
+      },
+      executionTarget: sandboxTarget,
+      onLog: async (stream, chunk) => {
+        chunks.push({ stream, chunk });
+      },
+    });
+
+    for (let i = 0; i < 300; i += 1) {
+      if ((startAdapterExecutionTargetPaperclipBridge as unknown as { mock: { calls: unknown[] } }).mock.calls.length > 0) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    const bridgeCalls = (startAdapterExecutionTargetPaperclipBridge as unknown as {
+      mock: { calls: Array<[unknown]> };
+    }).mock.calls;
+    const bridgeOptions = bridgeCalls[0]?.[0] as
+      | { onActivity?: (activity: { source: string | null; status: string | null; at: string | null; payload: Record<string, unknown> }) => Promise<void> }
+      | undefined;
+    expect(bridgeOptions?.onActivity).toEqual(expect.any(Function));
+
+    await bridgeOptions?.onActivity?.({
+      source: "paperclip_issue",
+      status: "terminal:blocked",
+      at: "2026-06-20T14:23:59.000Z",
+      payload: {
+        issueId: "issue-1",
+        issueKey: "LOC-48",
+        status: "blocked",
+      },
+    });
+
+    const result = await resultPromise;
+    expect(result.exitCode).toBe(0);
+    expect(result.timedOut).toBe(false);
+    expect(result.errorMessage).toBeNull();
+    expect(result.summary).toContain("LOC-48 was marked blocked");
+    expect(chunks.some((entry) =>
+      entry.chunk.includes("Codex did not exit after LOC-48 was marked blocked")
+    )).toBe(true);
+  }, 10_000);
 
   it("does not resume saved Codex sessions for remote SSH execution without a matching remote identity", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-remote-resume-"));

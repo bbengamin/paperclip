@@ -713,7 +713,9 @@ export function createPluginWorkerHandle(
         const event = isRecord(params.event) ? params.event : null;
         const stream = typeof event?.stream === "string" ? event.stream : null;
         const chunk = typeof event?.chunk === "string" ? event.chunk : null;
-        log.info(
+        // Per-tick stream plumbing: demoted to debug so the info-level console
+        // stream stays readable. Still captured in the debug file log.
+        log.debug(
           {
             method: notification.method,
             channel,
@@ -1455,7 +1457,7 @@ export function createPluginWorkerManager(
       return;
     }
     const event = method === "streams.emit" ? params.event : null;
-    log.info(
+    log.debug(
       { pluginId, channel, companyId, method, subscriberCount: subscribers.size },
       "publishing plugin stream notification to subscribers",
     );

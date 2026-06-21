@@ -179,6 +179,11 @@ function shellQuote(value: string) {
   return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
 
+function isMissingRemoteFileError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /\b(?:ENOENT|no such file|cannot open|can't open|not found)\b/i.test(message);
+}
+
 function normalizeMethod(value: string | null | undefined): string {
   return typeof value === "string" && value.trim().length > 0 ? value.trim().toUpperCase() : "GET";
 }
@@ -205,7 +210,7 @@ function buildRunnerFailureMessage(action: string, result: RunProcessResult): st
 
 async function runShell(
   runner: CommandManagedRuntimeRunner,
-  cwd: string,
+  cwd: string | undefined,
   script: string,
   timeoutMs: number,
   shellCommand: "bash" | "sh" = "sh",
@@ -468,8 +473,20 @@ export function createCommandManagedSandboxCallbackBridgeQueueClient(input: {
 }): SandboxCallbackBridgeQueueClient {
   const timeoutMs = normalizeTimeoutMs(input.timeoutMs, DEFAULT_BRIDGE_RESPONSE_TIMEOUT_MS);
   const shellCommand = preferredShellForSandbox(input.shellCommand);
+  // Every queue operation below addresses the queue with absolute paths, so the
+  // working directory is irrelevant to correctness. We deliberately run them
+  // with NO cwd (the login shell's default) rather than the workspace cwd: if
+  // the sandbox transiently loses the workspace dir (e.g. a container sleep/wake
+  // resets the ephemeral /workspace mount, or a recreated bridge session can't
+  // resolve it), a `cd <remoteCwd>` would fail with exit 2 ("cd: can't cd to
+  // /workspace/...") on every poll and kill the bridge worker after
+  // MAX_CONSECUTIVE_POLL_ERRORS. Without the cd, a missing queue dir instead
+  // makes listJsonFiles return empty (its `[ -d ]` guard) and writes recreate
+  // their parents, so the worker degrades gracefully rather than death-spiraling.
+  // (SSH runners fall back to their configured defaultCwd when cwd is omitted.)
+  const execCwd: string | undefined = undefined;
   const runChecked = async (action: string, script: string) =>
-    requireSuccessfulResult(action, await runShell(input.runner, input.remoteCwd, script, timeoutMs, shellCommand));
+    requireSuccessfulResult(action, await runShell(input.runner, execCwd, script, timeoutMs, shellCommand));
 
   return {
     makeDir: async (remotePath) => {
@@ -478,7 +495,7 @@ export function createCommandManagedSandboxCallbackBridgeQueueClient(input: {
     listJsonFiles: async (remotePath) => {
       const result = await runShell(
         input.runner,
-        input.remoteCwd,
+        execCwd,
         [
           `if [ -d ${shellQuote(remotePath)} ]; then`,
           `  for file in ${shellQuote(remotePath)}/*.json; do`,
@@ -527,7 +544,7 @@ export function createCommandManagedSandboxCallbackBridgeQueueClient(input: {
       const requestPath = options.requestPath?.trim() || "";
       const result = await runShell(
         input.runner,
-        input.remoteCwd,
+        execCwd,
         [
           "set -eu",
           `response_dir=${shellQuote(responseDir)}`,
@@ -634,13 +651,24 @@ export async function startSandboxCallbackBridgeWorker(input: {
   };
   // Maximum consecutive listJsonFiles poll failures before giving up. Transient
   // Cloudflare exec errors (e.g. "HTTP error! status: 500") should be retried;
-  // a long run of consecutive failures indicates the sandbox truly died.
-  const MAX_CONSECUTIVE_POLL_ERRORS = 10;
+  // a short run of consecutive failures indicates the sandbox truly died. Kept
+  // low so a dead sandbox is declared lost quickly (the heartbeat watchdog then
+  // finalizes + retries the run) instead of spending minutes cycling failures.
+  const MAX_CONSECUTIVE_POLL_ERRORS = 3;
 
   const processRequestFile = async (fileName: string) => {
     const requestPath = path.posix.join(directories.requestsDir, fileName);
     const responsePath = path.posix.join(directories.responsesDir, fileName);
-    const raw = await input.client.readTextFile(requestPath);
+    let raw: string;
+    try {
+      raw = await input.client.readTextFile(requestPath);
+    } catch (error) {
+      if (isMissingRemoteFileError(error)) {
+        await input.client.remove(requestPath).catch(() => undefined);
+        return;
+      }
+      throw error;
+    }
     let request: SandboxCallbackBridgeRequest;
     try {
       request = JSON.parse(raw) as SandboxCallbackBridgeRequest;
@@ -721,6 +749,10 @@ export async function startSandboxCallbackBridgeWorker(input: {
           requireRequestPath: false,
         });
       } catch (error) {
+        if (isMissingRemoteFileError(error)) {
+          await input.client.remove(requestPath).catch(() => undefined);
+          continue;
+        }
         console.warn(
           `[paperclip] sandbox callback bridge failed to abort pending request ${requestId}: ${error instanceof Error ? error.message : String(error)}`,
         );

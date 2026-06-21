@@ -38,6 +38,7 @@ import {
   stringifyPaperclipWakePayload,
   DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE,
   joinPromptSections,
+  type RunProcessResult,
 } from "@paperclipai/adapter-utils/server-utils";
 import {
   parseCodexJsonl,
@@ -52,6 +53,7 @@ import { SANDBOX_INSTALL_COMMAND } from "../index.js";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const SANDBOX_GLOBAL_CODEX_HOME = "/root/.codex";
+const SANDBOX_TERMINAL_ISSUE_GRACE_MS = 5_000;
 const CODEX_ROLLOUT_NOISE_RE =
   /^\d{4}-\d{2}-\d{2}T[^\s]+\s+ERROR\s+codex_core::rollout::list:\s+state db missing rollout path for thread\s+[a-z0-9-]+$/i;
 
@@ -166,6 +168,74 @@ function buildCodexSyntheticProgressJsonl(input: { id: number; message: string }
       text: input.message,
     },
   })}\n`;
+}
+
+type CodexRunAttempt = {
+  proc: Pick<RunProcessResult, "exitCode" | "signal" | "timedOut" | "stdout" | "stderr">;
+  rawStderr: string;
+  parsed: ReturnType<typeof parseCodexJsonl>;
+};
+
+type TerminalIssueDisposition = {
+  status: string;
+  issueId: string | null;
+  issueKey: string | null;
+  at: string;
+};
+
+function readTerminalIssueDispositionPayload(
+  activity: {
+    source: string | null;
+    status: string | null;
+    at: string | null;
+    payload: Record<string, unknown>;
+  },
+  expectedIssueIdOrKey: string | null = null,
+): TerminalIssueDisposition | null {
+  if (activity.source !== "paperclip_issue") return null;
+  const status = activity.status?.startsWith("terminal:")
+    ? activity.status.slice("terminal:".length).trim()
+    : "";
+  if (!status) return null;
+  const read = (key: string) => {
+    const value = activity.payload[key];
+    return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+  };
+  const issueId = read("issueId");
+  const issueKey = read("issueKey");
+  if (
+    expectedIssueIdOrKey &&
+    issueId !== expectedIssueIdOrKey &&
+    issueKey !== expectedIssueIdOrKey
+  ) {
+    return null;
+  }
+  return {
+    status,
+    issueId,
+    issueKey,
+    at: activity.at ?? new Date().toISOString(),
+  };
+}
+
+function buildCodexTerminalIssueAttempt(input: {
+  disposition: TerminalIssueDisposition;
+  stdout: string;
+}): CodexRunAttempt {
+  const issueName = input.disposition.issueKey ?? input.disposition.issueId ?? "Paperclip issue";
+  const message = `${issueName} was marked ${input.disposition.status} by this run; finalizing the remote Codex run from Paperclip disposition.`;
+  const stdout = `${input.stdout}${buildCodexSyntheticProgressJsonl({ id: 0, message })}`;
+  return {
+    proc: {
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      stdout,
+      stderr: "",
+    },
+    rawStderr: "",
+    parsed: parseCodexJsonl(stdout),
+  };
 }
 
 async function runSandboxPaperclipPreflight(input: {
@@ -684,6 +754,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   let lastEmittedCodexProgressMessage: string | null = null;
   let bridgeAliveWithoutCodexOutputEmitted = false;
   let syntheticProgressId = 0;
+  let capturedCodexStdout = "";
+  let terminalIssueDisposition: TerminalIssueDisposition | null = null;
+  let resolveTerminalIssueDisposition: ((disposition: TerminalIssueDisposition) => void) | null = null;
+  const terminalIssueDispositionPromise = new Promise<TerminalIssueDisposition>((resolve) => {
+    resolveTerminalIssueDisposition = resolve;
+  });
   const remoteCodexHome = executionTargetIsRemote
     ? preparedExecutionTargetRuntime?.assetDirs.home ??
       path.posix.join(effectiveExecutionCwd, ".paperclip-runtime", "codex", "home")
@@ -799,6 +875,17 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       hostApiToken: env.PAPERCLIP_API_KEY,
       onLog,
       onActivity: async (activity) => {
+        const disposition = readTerminalIssueDispositionPayload(activity, wakeTaskId);
+        if (disposition && !terminalIssueDisposition) {
+          terminalIssueDisposition = disposition;
+          resolveTerminalIssueDisposition?.(disposition);
+          const issueName = disposition.issueKey ?? disposition.issueId ?? "Paperclip issue";
+          await onLog(
+            "stdout",
+            `[paperclip] ${issueName} marked ${disposition.status} through the sandbox bridge; allowing ${SANDBOX_TERMINAL_ISSUE_GRACE_MS}ms for Codex to exit.\n`,
+          );
+          return;
+        }
         if (activity.source !== "sandbox_bridge" || activity.status !== "alive") return;
         const progress = latestCodexProgressMessage
           ? summarizeCodexProgressMessage(latestCodexProgressMessage)
@@ -1054,6 +1141,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           await logRemoteTiming(`first Codex ${stream} chunk received (${Buffer.byteLength(chunk, "utf8")} bytes)`);
         }
         if (stream === "stdout") {
+          capturedCodexStdout += chunk;
           const collected = collectCodexProgressMessages({ buffer: codexProgressBuffer, chunk });
           codexProgressBuffer = collected.buffer;
           for (const message of collected.messages) {
@@ -1081,8 +1169,78 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     };
   };
 
+  const runAttemptWithTerminalIssueFinalization = async (resumeSessionId: string | null): Promise<CodexRunAttempt> => {
+    const attemptPromise = runAttempt(resumeSessionId);
+    if (!executionTargetIsSandbox || !paperclipBridge) {
+      return await attemptPromise;
+    }
+
+    const attemptOutcomePromise = attemptPromise.then(
+      (attempt) => ({ kind: "attempt" as const, attempt }),
+      (error: unknown) => ({ kind: "attempt_error" as const, error }),
+    );
+    const terminalSignalPromise = terminalIssueDispositionPromise.then((disposition) => ({
+      kind: "terminal_signal" as const,
+      disposition,
+    }));
+
+    const firstWinner = await Promise.race([
+      attemptOutcomePromise,
+      terminalSignalPromise,
+    ]);
+    if (firstWinner.kind === "attempt") {
+      return firstWinner.attempt;
+    }
+    if (firstWinner.kind === "attempt_error") {
+      throw firstWinner.error;
+    }
+
+    const graceWinner = await Promise.race([
+      attemptOutcomePromise,
+      new Promise<{ kind: "terminal_issue"; disposition: TerminalIssueDisposition }>((resolve) => {
+        setTimeout(() => resolve({
+          kind: "terminal_issue",
+          disposition: firstWinner.disposition,
+        }), SANDBOX_TERMINAL_ISSUE_GRACE_MS);
+      }),
+    ]);
+    if (
+      graceWinner.kind === "attempt" &&
+      !graceWinner.attempt.proc.timedOut &&
+      (graceWinner.attempt.proc.exitCode ?? 0) === 0
+    ) {
+      return graceWinner.attempt;
+    }
+    if (graceWinner.kind === "attempt_error") {
+      await onLog(
+        "stderr",
+        `[paperclip] Remote Codex process failed after Paperclip disposition: ${graceWinner.error instanceof Error ? graceWinner.error.message : String(graceWinner.error)}\n`,
+      );
+    } else if (graceWinner.kind === "attempt") {
+      await onLog(
+        "stdout",
+        `[paperclip] Remote Codex process exited nonzero after Paperclip disposition; finalizing run from issue status.\n`,
+      );
+    }
+    const terminalDisposition =
+      graceWinner.kind === "terminal_issue"
+        ? graceWinner.disposition
+        : firstWinner.disposition;
+    if (graceWinner.kind === "terminal_issue") {
+      const issueName = terminalDisposition.issueKey ?? terminalDisposition.issueId ?? "Paperclip issue";
+      await onLog(
+        "stdout",
+        `[paperclip] Codex did not exit after ${issueName} was marked ${terminalDisposition.status}; finalizing run from Paperclip disposition.\n`,
+      );
+    }
+    return buildCodexTerminalIssueAttempt({
+      disposition: terminalDisposition,
+      stdout: capturedCodexStdout,
+    });
+  };
+
   const toResult = (
-    attempt: { proc: { exitCode: number | null; signal: string | null; timedOut: boolean; stdout: string; stderr: string }; rawStderr: string; parsed: ReturnType<typeof parseCodexJsonl> },
+    attempt: CodexRunAttempt,
     clearSessionOnMissingSession = false,
     isRetry = false,
   ): AdapterExecutionResult => {
@@ -1183,7 +1341,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     await logRemoteTiming(preflightFailure ? "sandbox Paperclip preflight failed" : "sandbox Paperclip preflight passed");
     if (preflightFailure) return preflightFailure;
 
-    const initial = await runAttempt(sessionId);
+    const initial = await runAttemptWithTerminalIssueFinalization(sessionId);
     if (
       sessionId &&
       !initial.proc.timedOut &&
@@ -1194,7 +1352,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         "stdout",
         `[paperclip] Codex resume session "${sessionId}" is unavailable; retrying with a fresh session.\n`,
       );
-      const retry = await runAttempt(null);
+      const retry = await runAttemptWithTerminalIssueFinalization(null);
       return toResult(retry, true, true);
     }
 

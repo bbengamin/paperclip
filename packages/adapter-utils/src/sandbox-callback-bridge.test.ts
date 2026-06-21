@@ -469,6 +469,43 @@ describe("sandbox callback bridge", () => {
     }
   });
 
+  it("ignores request files that disappear before the worker can abort them", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-bridge-missing-abort-"));
+    cleanupDirs.push(rootDir);
+    const queueDir = path.posix.join(rootDir, "queue");
+    const warnings: string[] = [];
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation((message: unknown) => {
+      warnings.push(String(message));
+    });
+
+    const worker = await startSandboxCallbackBridgeWorker({
+      client: {
+        makeDir: async () => {},
+        listJsonFiles: async () => ["stale-request.json"],
+        readTextFile: async () => {
+          throw new Error("sh: 1: cannot open /workspace/paperclip/.paperclip-runtime/codex/paperclip-bridge/queue/requests/stale-request.json: No such file");
+        },
+        writeTextFile: async () => {
+          throw new Error("unexpected writeTextFile");
+        },
+        rename: async () => {
+          throw new Error("unexpected rename");
+        },
+        remove: async () => {},
+      },
+      queueDir,
+      authorizeRequest: async () => null,
+      handleRequest: async () => ({
+        status: 200,
+        body: "ok",
+      }),
+    });
+
+    await worker.stop();
+    warnSpy.mockRestore();
+    expect(warnings.join("\n")).not.toContain("failed to abort pending request");
+  });
+
   it("serializes remote response writes so stop does not recreate a late orphaned response", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-bridge-response-lock-"));
     cleanupDirs.push(rootDir);
@@ -980,5 +1017,35 @@ describe("sandbox callback bridge", () => {
         PAPERCLIP_SANDBOX_EXEC_CHANNEL: "bridge",
       },
     }));
+  });
+
+  it("runs command-managed bridge operations with no cwd so a missing workspace dir can't kill the worker", async () => {
+    // All queue paths are absolute; the queue client must not `cd` into the
+    // workspace cwd, otherwise a transiently-missing /workspace (sandbox
+    // sleep/wake or a recreated bridge session) fails every op with
+    // "cd: can't cd to <remoteCwd>" and death-spirals the worker.
+    const runner = {
+      execute: vi.fn(async (_input: { cwd?: string }) => ({
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        stdout: "",
+        stderr: "",
+        pid: null,
+        startedAt: new Date().toISOString(),
+      })),
+    };
+    const client = createCommandManagedSandboxCallbackBridgeQueueClient({
+      runner,
+      remoteCwd: "/workspace/paperclip",
+      timeoutMs: 30_000,
+    });
+
+    await client.makeDir("/workspace/paperclip/.paperclip-runtime/codex/paperclip-bridge/queue/requests");
+    await client.listJsonFiles("/workspace/paperclip/.paperclip-runtime/codex/paperclip-bridge/queue/requests");
+
+    for (const call of runner.execute.mock.calls) {
+      expect(call[0].cwd).toBeUndefined();
+    }
   });
 });

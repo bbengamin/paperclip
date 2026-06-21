@@ -900,7 +900,9 @@ function createSandboxEnvironmentDriver(
                   if (eventType !== "message") return;
                   const parsed = readExecuteStreamEvent(event);
                   if (!parsed) return;
-                  log.info(
+                  // Per-chunk forwarding trace: demoted to debug so the
+                  // info-level console stream isn't flooded during streaming.
+                  log.debug(
                     {
                       pluginId,
                       providerKey,

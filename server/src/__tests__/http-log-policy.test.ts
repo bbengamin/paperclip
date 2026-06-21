@@ -61,6 +61,24 @@ describe("shouldSilenceHttpSuccessLog", () => {
     expect(shouldSilenceHttpSuccessLog("GET", "/sw.js", 200)).toBe(true);
   });
 
+  it("silences polling endpoints whether or not the /api prefix is present", () => {
+    // The http logger may observe the URL without the /api prefix depending on
+    // mount position; both forms must be silenced.
+    expect(
+      shouldSilenceHttpSuccessLog(
+        "GET",
+        "/heartbeat-runs/0ded26df-7036-4fc6-a1de-1bd69ac60601/log?offset=36631&limitBytes=256000",
+        200,
+      ),
+    ).toBe(true);
+    expect(shouldSilenceHttpSuccessLog("GET", "/issues/LOC-50/live-runs", 200)).toBe(true);
+    expect(
+      shouldSilenceHttpSuccessLog("GET", "/issues/4026b289-0cce-4069-b59c-fd36d055119e/live-runs", 200),
+    ).toBe(true);
+    expect(shouldSilenceHttpSuccessLog("GET", "/issues/LOC-50/active-run", 200)).toBe(true);
+    expect(shouldSilenceHttpSuccessLog("GET", "/companies/abc/live-runs", 200)).toBe(true);
+  });
+
   it("keeps normal successful application requests", () => {
     expect(shouldSilenceHttpSuccessLog("GET", "/api/issues/PAP-1383", 200)).toBe(false);
     expect(shouldSilenceHttpSuccessLog("PATCH", "/api/issues/PAP-1383", 200)).toBe(false);

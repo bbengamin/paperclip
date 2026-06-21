@@ -109,6 +109,11 @@ export interface AdapterExecutionTargetPaperclipBridgeActivity {
 export { sanitizeRemoteExecutionEnv } from "./remote-execution-env.js";
 
 export const DEFAULT_REMOTE_SANDBOX_ADAPTER_TIMEOUT_SEC = 300;
+const DEFAULT_PAPERCLIP_BRIDGE_RESPONSE_TIMEOUT_MS = 45_000;
+// Per-command cap for the host-side bridge queue client (poll/read/write shell
+// commands run over the provider RPC). Kept well under the 5-minute orphaned-run
+// watchdog so a stuck poll recovers quickly without starving liveness pings.
+const DEFAULT_BRIDGE_HOST_QUEUE_TIMEOUT_MS = 30_000;
 
 function parseObject(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -138,6 +143,10 @@ function resolveDefaultPaperclipApiUrl(): string {
   // 3100 matches the default Paperclip dev server port when the runtime does not provide one.
   const runtimePort = process.env.PAPERCLIP_LISTEN_PORT ?? process.env.PORT ?? "3100";
   return `http://${runtimeHost}:${runtimePort}`;
+}
+
+function sanitizeBridgePathSegment(value: string): string {
+  return value.replace(/[^A-Za-z0-9_.-]/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "") || "run";
 }
 
 function isBridgeDebugEnabled(env: NodeJS.ProcessEnv): boolean {
@@ -1062,6 +1071,62 @@ function readBridgeActivityPayload(input: {
   };
 }
 
+const PAPERCLIP_RUN_DISPOSITION_ISSUE_STATUSES = new Set([
+  "done",
+  "cancelled",
+  "blocked",
+  "in_review",
+]);
+
+function readBridgeIssueDispositionActivity(input: {
+  runId: string;
+  request: { method: string; path: string; body: string };
+  responseBody: string;
+}): AdapterExecutionTargetPaperclipBridgeActivity | null {
+  if (input.request.method.trim().toUpperCase() !== "PATCH") return null;
+  const match = input.request.path.match(/^\/api\/issues\/([^/]+)$/);
+  if (!match) return null;
+
+  let parsedResponse: Record<string, unknown> = {};
+  try {
+    const value = JSON.parse(input.responseBody || "{}");
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      parsedResponse = value as Record<string, unknown>;
+    }
+  } catch {
+    parsedResponse = {};
+  }
+
+  const responseStatus = readStringMeta(parsedResponse, "status");
+  if (!responseStatus || !PAPERCLIP_RUN_DISPOSITION_ISSUE_STATUSES.has(responseStatus)) {
+    return null;
+  }
+
+  const issueId = readStringMeta(parsedResponse, "id") ?? decodeURIComponent(match[1] ?? "");
+  const issueKey = readStringMeta(parsedResponse, "key");
+  const completedAt = readStringMeta(parsedResponse, "completedAt");
+  const cancelledAt = readStringMeta(parsedResponse, "cancelledAt");
+  const updatedAt = readStringMeta(parsedResponse, "updatedAt");
+  const at = completedAt ?? cancelledAt ?? updatedAt ?? new Date().toISOString();
+  return {
+    runId: input.runId,
+    source: "paperclip_issue",
+    status: `terminal:${responseStatus}`,
+    message: issueKey
+      ? `Issue ${issueKey} marked ${responseStatus}`
+      : `Issue ${issueId} marked ${responseStatus}`,
+    at,
+    payload: {
+      issueId,
+      ...(issueKey ? { issueKey } : {}),
+      status: responseStatus,
+      completedAt,
+      cancelledAt,
+      updatedAt,
+    },
+  };
+}
+
 async function readBridgeForwardResponseBody(response: Response, maxBodyBytes: number): Promise<string> {
   const rawContentLength = response.headers.get("content-length");
   if (rawContentLength) {
@@ -1122,7 +1187,11 @@ export async function startAdapterExecutionTargetPaperclipBridge(input: {
     input.runtimeRootDir?.trim().length
       ? input.runtimeRootDir.trim()
       : path.posix.join(target.remoteCwd, ".paperclip-runtime", input.adapterKey);
-  const bridgeRuntimeDir = path.posix.join(runtimeRootDir, "paperclip-bridge");
+  const bridgeRuntimeDir = path.posix.join(
+    runtimeRootDir,
+    "paperclip-bridge",
+    sanitizeBridgePathSegment(input.runId),
+  );
   const queueDir = path.posix.join(bridgeRuntimeDir, "queue");
   const assetRemoteDir = path.posix.join(bridgeRuntimeDir, "server");
   const bridgeToken = createSandboxCallbackBridgeToken();
@@ -1160,7 +1229,14 @@ export async function startAdapterExecutionTargetPaperclipBridge(input: {
       // a second; giving them the full run timeout causes the Cloudflare
       // sandbox bridge to hold poll HTTP connections open for minutes,
       // exhausting the Worker's connection pool and producing "fetch failed".
-      // The client's DEFAULT_BRIDGE_RESPONSE_TIMEOUT_MS is the right cap.
+      //
+      // We cap each bridge filesystem command at a value comfortably below the
+      // 5-minute orphaned-run watchdog window so that a single slow/stuck poll
+      // fails fast and the worker loop retries, instead of holding for ~60s and
+      // starving the in-sandbox liveness ("run alive") pings that flow through
+      // this same worker. Combined with the dedicated bridge session in the
+      // Cloudflare plugin, a stuck poll no longer disrupts the Codex run.
+      timeoutMs: DEFAULT_BRIDGE_HOST_QUEUE_TIMEOUT_MS,
       shellCommand,
     });
     // PAPERCLIP_BRIDGE_DEBUG opts into verbose stdout logs of every bridge
@@ -1202,16 +1278,23 @@ export async function startAdapterExecutionTargetPaperclipBridge(input: {
           );
         }
         const responseBody = await readBridgeForwardResponseBody(response, maxBodyBytes);
-        const activity = response.ok
-          ? readBridgeActivityPayload({ runId: input.runId, request: { method, path: request.path, body: request.body } })
-          : null;
-        if (activity) {
-          await input.onActivity?.(activity).catch((error) => {
-            void onLog(
-              "stderr",
-              `[paperclip] Bridge activity callback failed: ${error instanceof Error ? error.message : String(error)}\n`,
-            );
-          });
+        if (response.ok) {
+          const activities = [
+            readBridgeActivityPayload({ runId: input.runId, request: { method, path: request.path, body: request.body } }),
+            readBridgeIssueDispositionActivity({
+              runId: input.runId,
+              request: { method, path: request.path, body: request.body },
+              responseBody,
+            }),
+          ].filter((activity): activity is AdapterExecutionTargetPaperclipBridgeActivity => Boolean(activity));
+          for (const activity of activities) {
+            await input.onActivity?.(activity).catch((error) => {
+              void onLog(
+                "stderr",
+                `[paperclip] Bridge activity callback failed: ${error instanceof Error ? error.message : String(error)}\n`,
+              );
+            });
+          }
         }
         return {
           status: response.status,
@@ -1228,6 +1311,7 @@ export async function startAdapterExecutionTargetPaperclipBridge(input: {
       bridgeToken,
       bridgeAsset,
       timeoutMs: bridgeTimeoutMs,
+      responseTimeoutMs: DEFAULT_PAPERCLIP_BRIDGE_RESPONSE_TIMEOUT_MS,
       runId: input.runId,
       maxBodyBytes,
       shellCommand,
