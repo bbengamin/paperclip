@@ -28,6 +28,9 @@ import {
 } from "./server-utils.js";
 import { sanitizeRemoteExecutionEnv } from "./remote-execution-env.js";
 import { preferredShellForSandbox, shellCommandArgs } from "./sandbox-shell.js";
+import type { RuntimeProgressSink } from "./runtime-progress.js";
+
+export type { RuntimeProgressSink } from "./runtime-progress.js";
 
 export interface AdapterLocalExecutionTarget {
   kind: "local";
@@ -70,7 +73,7 @@ export interface PreparedAdapterExecutionTargetRuntime {
   workspaceRemoteDir: string | null;
   runtimeRootDir: string | null;
   assetDirs: Record<string, string>;
-  restoreWorkspace(): Promise<void>;
+  restoreWorkspace(onProgress?: RuntimeProgressSink): Promise<void>;
 }
 
 export interface AdapterExecutionTargetProcessOptions {
@@ -950,6 +953,11 @@ export async function prepareAdapterExecutionTargetRuntime(input: {
   detectCommand?: string | null;
   /** When false, only sync `assets`; leave the remote workspace untouched (provider-realized workspaces). */
   syncWorkspace?: boolean;
+  // Optional progress sink for the workspace/asset upload. The returned
+  // `restoreWorkspace(onProgress?)` accepts its own sink for teardown. Both are
+  // forwarded down to the transport so the sandbox/SSH children can attach byte
+  // counters without further changes here.
+  onProgress?: RuntimeProgressSink;
 }): Promise<PreparedAdapterExecutionTargetRuntime> {
   const target = input.target ?? { kind: "local" as const };
   if (target.kind === "local") {
@@ -970,6 +978,7 @@ export async function prepareAdapterExecutionTargetRuntime(input: {
       workspaceLocalDir: input.workspaceLocalDir,
       workspaceRemoteDir: input.workspaceRemoteDir,
       assets: input.assets,
+      onProgress: input.onProgress,
     });
     return {
       target,
@@ -1001,6 +1010,7 @@ export async function prepareAdapterExecutionTargetRuntime(input: {
     installCommand: input.installCommand,
     detectCommand: input.detectCommand,
     syncWorkspace: input.syncWorkspace,
+    onProgress: input.onProgress,
   });
   return {
     target,
