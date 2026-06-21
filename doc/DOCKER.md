@@ -10,7 +10,7 @@ All commands below assume you are in the **project root** (the directory contain
 docker build -t paperclip-local .
 ```
 
-The Dockerfile installs common agent tools (`git`, `gh`, `curl`, `wget`, `ripgrep`, `python3`) and the Claude, Codex, and OpenCode CLIs.
+The Dockerfile installs common agent tools (`git`, `gh`, `curl`, `wget`, `ripgrep`, `python3`, `uvx`, `bubblewrap`) and the Claude, Codex, and OpenCode CLIs.
 
 Fork note: this fork also includes an optional nested Docker runtime for agent runs. See [FORK-DOCKER.md](./FORK-DOCKER.md).
 
@@ -139,6 +139,8 @@ The image pre-installs:
 
 - `claude` (Anthropic Claude Code CLI)
 - `codex` (OpenAI Codex CLI)
+- `bubblewrap` (`bwrap`) for Codex's Linux sandbox prerequisite
+- `uvx` for Codex MCP server commands that invoke Python tools, such as `uvx mcp-proxy ...`
 
 If you want local adapter runs inside the container, pass API keys when starting the container:
 
@@ -157,6 +159,7 @@ Notes:
 
 - Without API keys, the app still runs normally.
 - Adapter environment checks in Paperclip will surface missing auth/CLI prerequisites.
+- Codex MCP servers that use `uvx` can be configured in the persisted Codex home under the mounted Paperclip data directory.
 
 ## Podman Quadlet (systemd)
 

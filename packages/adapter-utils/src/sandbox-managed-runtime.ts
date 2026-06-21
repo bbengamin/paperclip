@@ -137,6 +137,22 @@ async function createTarballFromDirectory(input: {
   followSymlinks?: boolean;
 }): Promise<void> {
   const excludeArgs = ["._*", ...(input.exclude ?? [])].flatMap((entry) => ["--exclude", entry]);
+  // Archive the directory's top-level entries BY NAME rather than ".". Archiving
+  // "." embeds a "./" self-entry whose mode/mtime tar then tries to restore onto
+  // the extraction target directory; that chmod/utime fails with "Operation not
+  // permitted" when the target is a directory the extracting (non-root) user does
+  // not own, e.g. an emptyDir mount in a hardened/gVisor sandbox pod. Enumerating
+  // entries avoids the self-entry entirely and is portable across GNU/BSD/busybox
+  // tar (no GNU-only --no-overwrite-dir needed). --exclude still filters nested
+  // matches and any named entry it matches.
+  const entries = (await fs.readdir(input.localDir)).sort((left, right) => left.localeCompare(right));
+  if (entries.length === 0) {
+    // A workspace can legitimately be empty (blank-workspace agent runs). Write a
+    // valid empty tar archive (1024-byte all-zero EOF marker) so extraction is a
+    // clean no-op rather than tar refusing to create an empty archive.
+    await fs.writeFile(input.archivePath, Buffer.alloc(1024));
+    return;
+  }
   await execTar([
     "-c",
     // Prevent macOS bsdtar from embedding LIBARCHIVE.xattr.* PAX extended
@@ -155,7 +171,12 @@ async function createTarballFromDirectory(input: {
     "-C",
     input.localDir,
     ...excludeArgs,
-    ".",
+    // Archive top-level entries BY NAME (upstream): avoids the "./" self-entry
+    // whose chmod/utime restore fails on non-owned target dirs in hardened
+    // sandbox pods. Combined with our basename + cwd above so GNU tar on Windows
+    // doesn't parse a `C:\…` archive path as a remote host:file spec.
+    "--",
+    ...entries,
   ], { cwd: path.dirname(input.archivePath) });
 }
 
