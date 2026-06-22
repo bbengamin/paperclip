@@ -34,6 +34,11 @@ const REMOTE_MANAGED_ADAPTERS = new Set<AgentAdapterType>([
   "acpx_local",
   "claude_local",
   "codex_local",
+  // LOCAL TEST-BRANCH ONLY — upstream core gate has no extension seam for
+  // external adapters; codex_remote needs sandbox/ssh eligibility. Not on the
+  // codex-remote feature branch. Candidate for an upstream PR (ideally a
+  // declarative seam rather than a hardcoded entry).
+  "codex_remote",
   "cursor",
   "gemini_local",
   "opencode_local",
