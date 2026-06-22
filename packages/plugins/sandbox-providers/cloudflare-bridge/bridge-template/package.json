@@ -1,0 +1,21 @@
+{
+  "name": "paperclip-cloudflare-bridge-sandbox-bridge-template",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "build": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --config vitest.config.ts"
+  },
+  "dependencies": {
+    "@cloudflare/sandbox": "^0.12.1"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260615.1",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.8",
+    "wrangler": "^4.100.0"
+  }
+}
