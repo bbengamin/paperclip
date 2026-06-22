@@ -28,9 +28,9 @@ Optional, for private-network access through Tailscale:
 npx wrangler secret put TAILSCALE_AUTHKEY
 ```
 
-The bridge container image installs Tailscale and Codex during deploy. When `TAILSCALE_AUTHKEY` is set, the bridge runs `tailscale-up` inside each sandbox before preparing the Paperclip workspace. Keep this auth key in Cloudflare Worker secrets; do not put it in the Dockerfile or Paperclip environment config.
+The bridge container image installs Tailscale during deploy. When `TAILSCALE_AUTHKEY` is set, the bridge runs `tailscale-up` inside each sandbox before preparing the Paperclip workspace. Keep this auth key in Cloudflare Worker secrets; do not put it in the Dockerfile or Paperclip environment config.
 
-For Codex Remote adapters that use ChatGPT subscription auth, Paperclip's environment test verifies the sandbox, copied Codex home, Tailscale, and configured model provider connectivity. It intentionally skips the full Codex conversation probe because subscription tokens can require an interactive refresh and may otherwise hold the test request open until the plugin RPC times out.
+This image is intentionally **runtime-agnostic** — it does not bake in any agent CLI. Adapters that run in the sandbox (e.g. `codex_remote`) provision their own runtime at execution time, or you can extend the Dockerfile to pre-install a runtime if you prefer warmer starts.
 
 ## Local development
 
