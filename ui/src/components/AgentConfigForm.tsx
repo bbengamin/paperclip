@@ -116,6 +116,13 @@ export function supportsAdapterModelRefresh(adapterType: string): boolean {
   return adapterType === "claude_local" || adapterType === "codex_local" || adapterType === "acpx_local";
 }
 
+export function resolveEffectiveAdapterTestEnvironmentId(input: {
+  currentDefaultEnvironmentId: string;
+  instanceDefaultEnvironmentId: string;
+}): string {
+  return input.currentDefaultEnvironmentId || input.instanceDefaultEnvironmentId || "";
+}
+
 function isOverlayDirty(o: AgentConfigOverlay): boolean {
   return (
     Object.keys(o.identity).length > 0 ||
@@ -379,6 +386,13 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
     () => environments.find((environment) => environment.id === instanceDefaultEnvironmentId) ?? null,
     [environments, instanceDefaultEnvironmentId],
   );
+  const effectiveAdapterTestEnvironmentId = useMemo(
+    () => resolveEffectiveAdapterTestEnvironmentId({
+      currentDefaultEnvironmentId,
+      instanceDefaultEnvironmentId,
+    }),
+    [currentDefaultEnvironmentId, instanceDefaultEnvironmentId],
+  );
 
   // When the instance forces Kubernetes execution, new agents must default to the
   // managed Kubernetes sandbox environment (never the implicit local default).
@@ -411,7 +425,7 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
 
   // Fetch adapter models for the effective adapter type
   const modelQueryKey = selectedCompanyId
-    ? queryKeys.agents.adapterModels(selectedCompanyId, adapterType, currentDefaultEnvironmentId || null)
+    ? queryKeys.agents.adapterModels(selectedCompanyId, adapterType, effectiveAdapterTestEnvironmentId || null)
     : ["agents", "none", "adapter-models", adapterType];
   const {
     data: fetchedModels,
@@ -419,7 +433,7 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
   } = useQuery({
     queryKey: modelQueryKey,
     queryFn: () => agentsApi.adapterModels(selectedCompanyId!, adapterType, {
-      environmentId: currentDefaultEnvironmentId || null,
+      environmentId: effectiveAdapterTestEnvironmentId || null,
     }),
     enabled: Boolean(selectedCompanyId),
   });
@@ -533,7 +547,7 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
       }
       return agentsApi.testEnvironment(selectedCompanyId, adapterType, {
         adapterConfig: buildAdapterConfigForTest(),
-        environmentId: currentDefaultEnvironmentId || null,
+        environmentId: effectiveAdapterTestEnvironmentId || null,
       });
     },
   });

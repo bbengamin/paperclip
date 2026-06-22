@@ -49,6 +49,8 @@ import {
 import { pathExists, prepareManagedCodexHome, prepareRemoteCodexHomeAsset, resolveManagedCodexHomeDir, resolveSharedCodexHomeDir } from "./codex-home.js";
 import { resolveCodexDesiredSkillNames } from "./skills.js";
 import { buildCodexExecArgs } from "./codex-args.js";
+import { applyTailscaleProxyEnv, ensureSandboxTailscaleUp, readTailscaleAuthKey } from "./tailscale.js";
+import { stripNonPosixSandboxEnvKeys } from "./sandbox-env.js";
 import { SANDBOX_INSTALL_COMMAND } from "../index.js";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
@@ -598,7 +600,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     effectiveExecutionCwd = preparedExecutionTargetRuntime.workspaceRemoteDir;
   }
   const runtimeExecutionTarget = overrideAdapterExecutionTargetRemoteCwd(executionTarget, effectiveExecutionCwd);
-  const restoreRemoteWorkspace = preparedExecutionTargetRuntime
+  // Only pull workspace changes back to the host when we also uploaded the
+  // workspace. With skipRemoteWorkspaceSync the sandbox owns the workspace
+  // (runtime-owned), so there is nothing to restore — the agent persists its
+  // own changes from inside the sandbox (git push / MCP / API). This also keeps
+  // codex_remote from doing a host-side download of the run's changes.
+  const restoreRemoteWorkspace = preparedExecutionTargetRuntime && !skipRemoteWorkspaceSync
     ? () => preparedExecutionTargetRuntime.restoreWorkspace()
     : null;
   let paperclipBridge: Awaited<ReturnType<typeof startAdapterExecutionTargetPaperclipBridge>> = null;
@@ -707,7 +714,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   if (!hasExplicitApiKey && authToken) {
     env.PAPERCLIP_API_KEY = authToken;
   }
-  if (executionTargetIsRemote && adapterExecutionTargetUsesPaperclipBridge(runtimeExecutionTarget)) {
+  const shouldUsePaperclipBridge =
+    executionTargetIsSandbox && adapterExecutionTargetUsesPaperclipBridge(runtimeExecutionTarget);
+  if (shouldUsePaperclipBridge) {
     paperclipBridge = await startAdapterExecutionTargetPaperclipBridge({
       runId,
       target: runtimeExecutionTarget,
@@ -733,6 +742,22 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       (entry): entry is [string, string] => typeof entry[1] === "string",
     ),
   );
+  // Remote sandboxes run a POSIX shell: drop host env keys that aren't valid
+  // shell identifiers (e.g. Windows `ProgramFiles(x86)`) before they reach the
+  // sandbox, which otherwise rejects the whole exec.
+  if (executionTargetIsRemote) {
+    stripNonPosixSandboxEnvKeys(env);
+    stripNonPosixSandboxEnvKeys(runtimeEnv);
+  }
+  // When the sandbox runs behind Tailscale (auth key supplied via the
+  // environment's env vars), route outbound traffic through the userspace proxy
+  // so Codex can reach a private/tailnet model provider. The tailnet itself is
+  // brought up below, before the preflight. localhost (the callback bridge)
+  // stays direct via NO_PROXY.
+  if (executionTargetIsSandbox && readTailscaleAuthKey(envConfig)) {
+    applyTailscaleProxyEnv(env);
+    applyTailscaleProxyEnv(runtimeEnv);
+  }
   await ensureAdapterExecutionTargetRuntimeCommandInstalled({
     runId,
     target: executionTarget,
@@ -1059,6 +1084,20 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   };
 
   try {
+    // Bring up Tailscale before anything talks to the model provider. No-op
+    // unless this is a sandbox with TAILSCALE_AUTHKEY set; throws on failure so
+    // a broken tailnet stops the run with a clear error instead of Codex later
+    // failing to reach the provider.
+    if (await ensureSandboxTailscaleUp({
+      runId,
+      target: runtimeExecutionTarget ?? null,
+      envConfig,
+      cwd: effectiveExecutionCwd,
+      timeoutSec,
+      onLog,
+    })) {
+      await logRemoteTiming("sandbox Tailscale ready");
+    }
     const preflightFailure = await runSandboxPaperclipPreflight({
       runId,
       target: runtimeExecutionTarget ?? null,

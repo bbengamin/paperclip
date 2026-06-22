@@ -142,6 +142,8 @@ describe("codex remote execution", () => {
         command: "codex",
         env: {
           CODEX_HOME: codexHomeDir,
+          PAPERCLIP_API_URL: "http://host.docker.internal:3100",
+          PAPERCLIP_API_KEY: "agent-api-key",
         },
       },
       context: {
@@ -221,10 +223,11 @@ describe("codex remote execution", () => {
         repoRef: "feature/other",
       },
     ]);
-    expect(call?.[3].env.PAPERCLIP_API_URL).toBe("http://127.0.0.1:4310");
-    expect(call?.[3].env.PAPERCLIP_API_BRIDGE_MODE).toBe("queue_v1");
+    expect(call?.[3].env.PAPERCLIP_API_URL).toBe("http://host.docker.internal:3100");
+    expect(call?.[3].env.PAPERCLIP_API_KEY).toBe("agent-api-key");
+    expect(call?.[3].env.PAPERCLIP_API_BRIDGE_MODE).toBeUndefined();
     expect(call?.[3].remoteExecution?.remoteCwd).toBe(managedRemoteWorkspace);
-    expect(startAdapterExecutionTargetPaperclipBridge).toHaveBeenCalledTimes(1);
+    expect(startAdapterExecutionTargetPaperclipBridge).not.toHaveBeenCalled();
     expect(restoreWorkspaceFromSshExecution).toHaveBeenCalledTimes(1);
     expect(restoreWorkspaceFromSshExecution).toHaveBeenCalledWith(expect.objectContaining({
       localDir: workspaceDir,

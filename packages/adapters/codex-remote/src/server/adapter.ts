@@ -17,7 +17,10 @@ import {
   type AdapterRuntimeCommandSpec,
   type ServerAdapterModule,
 } from "@paperclipai/adapter-utils";
-import type { AdapterSandboxExecutionTarget } from "@paperclipai/adapter-utils/execution-target";
+import type {
+  AdapterExecutionTarget,
+  AdapterSandboxExecutionTarget,
+} from "@paperclipai/adapter-utils/execution-target";
 import type { CommandManagedRuntimeRunner } from "@paperclipai/adapter-utils/command-managed-runtime";
 
 import { execute as baseExecute } from "./execute.js";
@@ -36,15 +39,21 @@ type CodexRemoteSandboxTarget = AdapterSandboxExecutionTarget & {
   runner: CommandManagedRuntimeRunner;
 };
 
-function requireSandboxTarget(ctx: AdapterExecutionContext): CodexRemoteSandboxTarget {
+type CodexRemoteExecutionTarget = Extract<AdapterExecutionTarget, { kind: "remote" }>;
+
+function requireRemoteTarget(ctx: AdapterExecutionContext): CodexRemoteExecutionTarget {
   const target = ctx.executionTarget;
-  if (!target || target.kind !== "remote" || target.transport !== "sandbox") {
-    throw new Error("codex_remote requires a sandbox execution target.");
+  if (!target || target.kind !== "remote") {
+    throw new Error("codex_remote requires a remote execution target.");
   }
-  if (!target.runner) {
+  if (target.transport === "sandbox" && !target.runner) {
     throw new Error("codex_remote requires a sandbox runner from the environment provider.");
   }
-  return target as CodexRemoteSandboxTarget;
+  return target;
+}
+
+function isSandboxTarget(target: CodexRemoteExecutionTarget): target is CodexRemoteSandboxTarget {
+  return target.transport === "sandbox";
 }
 
 function failureResult(error: unknown, prefix: string): AdapterExecutionResult {
@@ -106,27 +115,31 @@ async function verifySandboxWorkspace(input: {
 }
 
 async function executeCodexRemote(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
-  const target = requireSandboxTarget(ctx);
+  const target = requireRemoteTarget(ctx);
   const config = applyCodexRemoteDefaults(ctx.config);
   const codexRunTimeoutMs =
     typeof config.timeoutSec === "number" && config.timeoutSec > 0
       ? config.timeoutSec * 1_000
       : DEFAULT_REMOTE_TIMEOUT_SEC * 1_000;
 
-  try {
-    await verifySandboxWorkspace({ ctx, target });
-    await verifySandboxWorkspace({ ctx, target, bridgeChannel: true });
-  } catch (error) {
-    return failureResult(error, "codex_remote_prepare_failed");
+  if (isSandboxTarget(target)) {
+    try {
+      await verifySandboxWorkspace({ ctx, target });
+      await verifySandboxWorkspace({ ctx, target, bridgeChannel: true });
+    } catch (error) {
+      return failureResult(error, "codex_remote_prepare_failed");
+    }
   }
 
   try {
     return await baseExecute({
       ...ctx,
-      executionTarget: {
-        ...target,
-        timeoutMs: codexRunTimeoutMs,
-      },
+      executionTarget: isSandboxTarget(target)
+        ? {
+            ...target,
+            timeoutMs: codexRunTimeoutMs,
+          }
+        : target,
       config,
     });
   } catch (error) {

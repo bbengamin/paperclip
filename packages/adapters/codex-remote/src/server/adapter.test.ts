@@ -1,5 +1,14 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { applyCodexRemoteDefaults, createServerAdapter, CODEX_REMOTE_TYPE } from "./adapter.js";
+
+vi.mock("./execute.js", () => ({
+  execute: vi.fn(async () => ({
+    exitCode: 0,
+    signal: null,
+    timedOut: false,
+    resultJson: { ok: true },
+  })),
+}));
 
 describe("createServerAdapter", () => {
   it("returns a complete standalone codex_remote module", () => {
@@ -29,7 +38,7 @@ describe("createServerAdapter", () => {
     expect(spec?.installCommand).toBeNull();
   });
 
-  it("rejects a non-sandbox execution target", async () => {
+  it("rejects a non-remote execution target", async () => {
     const adapter = createServerAdapter();
     await expect(
       adapter.execute({
@@ -37,7 +46,32 @@ describe("createServerAdapter", () => {
         executionTarget: { kind: "local" },
         onLog: async () => {},
       } as never),
-    ).rejects.toThrow(/sandbox execution target/);
+    ).rejects.toThrow(/remote execution target/);
+  });
+
+  it("accepts an SSH execution target", async () => {
+    const adapter = createServerAdapter();
+    const result = await adapter.execute({
+      config: {},
+      executionTarget: {
+        kind: "remote",
+        transport: "ssh",
+        remoteCwd: "/workspace",
+        spec: {
+          host: "127.0.0.1",
+          port: 2222,
+          username: "paperclip",
+          remoteWorkspacePath: "/workspace",
+          remoteCwd: "/workspace",
+          privateKey: "PRIVATE KEY",
+          knownHosts: "[127.0.0.1]:2222 ssh-ed25519 AAAA",
+          strictHostKeyChecking: true,
+        },
+      },
+      onLog: async () => {},
+    } as never);
+
+    expect(result.exitCode).toBe(0);
   });
 });
 

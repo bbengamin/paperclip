@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { Environment } from "@paperclipai/shared";
-import { supportsAdapterModelRefresh } from "./AgentConfigForm";
+import {
+  resolveEffectiveAdapterTestEnvironmentId,
+  supportsAdapterModelRefresh,
+} from "./AgentConfigForm";
 import { resolveForcedKubernetesEnvironment } from "../lib/forced-kubernetes-environment";
 
 describe("supportsAdapterModelRefresh", () => {
@@ -13,6 +16,29 @@ describe("supportsAdapterModelRefresh", () => {
   it("keeps the refresh action hidden for adapters without a live refresh hook", () => {
     expect(supportsAdapterModelRefresh("opencode_local")).toBe(false);
     expect(supportsAdapterModelRefresh("process")).toBe(false);
+  });
+});
+
+describe("resolveEffectiveAdapterTestEnvironmentId", () => {
+  it("uses an explicit agent environment override first", () => {
+    expect(resolveEffectiveAdapterTestEnvironmentId({
+      currentDefaultEnvironmentId: "env-agent",
+      instanceDefaultEnvironmentId: "env-instance",
+    })).toBe("env-agent");
+  });
+
+  it("inherits the non-local instance default when no agent override is set", () => {
+    expect(resolveEffectiveAdapterTestEnvironmentId({
+      currentDefaultEnvironmentId: "",
+      instanceDefaultEnvironmentId: "env-instance",
+    })).toBe("env-instance");
+  });
+
+  it("returns an empty id when neither agent nor instance has a non-local default", () => {
+    expect(resolveEffectiveAdapterTestEnvironmentId({
+      currentDefaultEnvironmentId: "",
+      instanceDefaultEnvironmentId: "",
+    })).toBe("");
   });
 });
 

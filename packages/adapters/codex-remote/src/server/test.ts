@@ -23,9 +23,11 @@ import path from "node:path";
 import os from "node:os";
 import { parseCodexJsonl } from "./parse.js";
 import { SANDBOX_INSTALL_COMMAND } from "../index.js";
+import { applyTailscaleProxyEnv, ensureSandboxTailscaleUp, readTailscaleAuthKey } from "./tailscale.js";
+import { stripNonPosixSandboxEnvKeys } from "./sandbox-env.js";
 import { codexHomeDir, readCodexAuthInfo } from "./quota.js";
 import { buildCodexExecArgs } from "./codex-args.js";
-import { prepareManagedCodexHome } from "./codex-home.js";
+import { prepareManagedCodexHome, prepareRemoteCodexHomeAsset } from "./codex-home.js";
 
 function summarizeStatus(checks: AdapterEnvironmentCheck[]): AdapterEnvironmentTestResult["status"] {
   if (checks.some((check) => check.level === "error")) return "fail";
@@ -152,11 +154,11 @@ async function addRemoteCodexHomeDiagnostics(input: {
     });
   } else {
     input.checks.push({
-      code: "codex_remote_auth_missing",
-      level: "warn",
-      message: "Remote Codex auth file is missing.",
+      code: "codex_remote_auth_not_shipped",
+      level: "info",
+      message: "Remote Codex auth.json is not shipped (by design).",
       detail: `CODEX_HOME=${facts.home ?? codexHome}`,
-      hint: "Run `codex login` on the Paperclip host, then retry. Paperclip should copy the managed Codex home into the sandbox.",
+      hint: "Remote runs authenticate via the sanitized config.toml provider (e.g. requires_openai_auth = false + a bearer token), so no ChatGPT auth.json is copied into the sandbox.",
     });
   }
 
@@ -456,18 +458,26 @@ async function prepareCodexHelloProbe(input: {
 }> {
   let preparedRuntime: Awaited<ReturnType<typeof prepareAdapterExecutionTargetRuntime>> | null = null;
   let preparedRuntimeWorkspaceLocalDir: string | null = null;
+  let remoteCodexHomeAssetCleanup: (() => Promise<void>) | null = null;
 
   const cleanup = async () => {
     await preparedRuntime?.restoreWorkspace().catch(() => {});
     if (preparedRuntimeWorkspaceLocalDir) {
       await fs.rm(preparedRuntimeWorkspaceLocalDir, { recursive: true, force: true }).catch(() => {});
     }
+    await remoteCodexHomeAssetCleanup?.().catch(() => {});
   };
 
   if (input.targetIsRemote && !input.probeApiKey) {
+    // Ship the same sanitized home real runs use (prepareRemoteCodexHomeAsset):
+    // sanitized config.toml and NO auth.json. This keeps the probe faithful to
+    // runs and respects `requires_openai_auth = false` (provider credentials
+    // come from config.toml, not a copied ChatGPT auth.json).
     const managedHome = await prepareManagedCodexHome(process.env, async () => {}, input.companyId, {
       apiKey: null,
     });
+    const remoteCodexHomeAsset = await prepareRemoteCodexHomeAsset(managedHome);
+    remoteCodexHomeAssetCleanup = remoteCodexHomeAsset.cleanup;
     preparedRuntimeWorkspaceLocalDir = await fs.mkdtemp(
       path.join(os.tmpdir(), `paperclip-codex-envtest-${input.runId}-`),
     );
@@ -486,7 +496,7 @@ async function prepareCodexHelloProbe(input: {
       assets: [
         {
           key: "home",
-          localDir: managedHome,
+          localDir: remoteCodexHomeAsset.dir,
           followSymlinks: true,
         },
       ],
@@ -580,6 +590,41 @@ export async function testEnvironment(
     if (typeof value === "string") env[key] = value;
   }
   const runtimeEnv = ensurePathInEnv({ ...process.env, ...env });
+  // Remote sandboxes run a POSIX shell: drop host env keys that aren't valid
+  // shell identifiers (e.g. Windows `ProgramFiles(x86)`) before they reach it.
+  if (targetIsRemote) {
+    stripNonPosixSandboxEnvKeys(env);
+    stripNonPosixSandboxEnvKeys(runtimeEnv);
+  }
+  // Bring up Tailscale for the probe so the provider-connectivity diagnostics
+  // and hello probe can reach a private/tailnet model provider. Surfaced as a
+  // check (never thrown) so the probe still returns its other diagnostics.
+  if (targetIsSandbox && readTailscaleAuthKey(envConfig)) {
+    try {
+      await ensureSandboxTailscaleUp({
+        runId,
+        target,
+        envConfig,
+        cwd,
+        timeoutSec: 60,
+        onLog: async () => {},
+      });
+      applyTailscaleProxyEnv(env);
+      checks.push({
+        code: "codex_tailscale_up",
+        level: "info",
+        message: "Brought up Tailscale in the sandbox for this probe.",
+      });
+    } catch (err) {
+      checks.push({
+        code: "codex_tailscale_up_failed",
+        level: "error",
+        message: "Could not bring up Tailscale in the sandbox.",
+        detail: (err instanceof Error ? err.message : String(err)).slice(0, 240),
+        hint: "Verify TAILSCALE_AUTHKEY in the environment env vars and that the sandbox image ships tailscale + the tailscale-up helper.",
+      });
+    }
+  }
   const installCheck = await maybeRunSandboxInstallCommand({
     runId,
     target,
@@ -797,7 +842,9 @@ export async function testEnvironment(
           checks.push({
             code: "codex_hello_probe_transport_error",
             level: "warn",
-            message: "Could not complete the Codex hello probe in the remote sandbox.",
+            message: targetIsSandbox
+              ? "Could not complete the Codex hello probe in the remote sandbox."
+              : "Could not complete the Codex hello probe.",
             detail: (err instanceof Error ? err.message : String(err)).slice(0, 240),
             hint: targetIsSandbox
               ? "The cold sandbox can take 1-2 minutes for the first `codex exec`. The diagnostics above already confirm the sandbox, Tailscale, Codex CLI, copied config, and model provider; retry the test once the sandbox is warm, or start a real run to confirm."
