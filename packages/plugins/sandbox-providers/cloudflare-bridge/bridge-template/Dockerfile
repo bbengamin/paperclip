@@ -25,6 +25,9 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 
 COPY tailscale-up.sh /usr/local/bin/tailscale-up
-RUN chmod +x /usr/local/bin/tailscale-up
+# Strip any CR characters defensively: a CRLF shebang (e.g. from a Windows
+# checkout) makes the container fail with exit 127 "/bin/sh\r: not found".
+RUN sed -i 's/\r$//' /usr/local/bin/tailscale-up \
+  && chmod +x /usr/local/bin/tailscale-up
 
 WORKDIR /workspace
