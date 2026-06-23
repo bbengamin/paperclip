@@ -1,6 +1,6 @@
 {
-  "name": "paperclip-plugin-codex-remote",
-  "version": "0.3.1",
+  "name": "@right-link/paperclip-plugin-codex-remote",
+  "version": "0.3.2",
   "description": "Standalone external Codex sandbox adapter for Paperclip (fork add-on, installed via the adapter plugin store)",
   "license": "MIT",
   "homepage": "https://github.com/paperclipai/paperclip",
@@ -60,18 +60,20 @@
     "skills"
   ],
   "scripts": {
-    "build": "tsc && pnpm run build:ui-parser",
+    "build": "tsc --emitDeclarationOnly && pnpm run build:bundle && pnpm run build:ui-parser",
+    "build:bundle": "pnpm exec esbuild src/server/adapter.ts src/server/index.ts src/index.ts src/ui/index.ts src/cli/index.ts --bundle --splitting --format=esm --platform=node --outdir=dist --external:picocolors",
     "build:ui-parser": "pnpm exec esbuild src/ui-parser.ts --bundle --format=cjs --platform=browser --outfile=dist/ui-parser.js",
     "clean": "rm -rf dist",
     "typecheck": "tsc --noEmit",
     "probe:quota": "pnpm exec tsx src/cli/quota-probe.ts --json"
   },
   "dependencies": {
-    "@paperclipai/adapter-utils": "workspace:*",
     "picocolors": "^1.1.1"
   },
   "devDependencies": {
+    "@paperclipai/adapter-utils": "workspace:*",
     "@types/node": "^24.6.0",
+    "esbuild": "^0.28.0",
     "typescript": "^5.7.3"
   }
 }
