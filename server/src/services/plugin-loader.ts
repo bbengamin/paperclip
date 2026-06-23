@@ -2165,7 +2165,11 @@ export function pluginLoader(
       // (for example @paperclipai/shared exports). Run those workers through
       // the tsx loader so first-party example plugins work in development.
       if (activePlugin.packagePath && existsSync(DEV_TSX_LOADER_PATH)) {
-        workerOptions.execArgv = ["--import", DEV_TSX_LOADER_PATH];
+        // `--import` expects a module specifier, not a bare filesystem path. On
+        // Windows a raw absolute path (C:\...) is parsed as a URL with scheme
+        // "c:" and rejected (ERR_UNSUPPORTED_ESM_URL_SCHEME), so pass a file://
+        // URL, which is valid on every platform.
+        workerOptions.execArgv = ["--import", pathToFileURL(DEV_TSX_LOADER_PATH).href];
       }
 
       await workerManager.startWorker(pluginId, workerOptions);

@@ -133,6 +133,69 @@ describe("resolveEnvironmentExecutionTarget", () => {
     });
   });
 
+  it("resolves sandbox execution targets for codex_remote", async () => {
+    mockResolveEnvironmentDriverConfigForRuntime.mockResolvedValue({
+      driver: "sandbox",
+      config: {
+        provider: "cloudflare",
+        reuseLease: false,
+        timeoutMs: 30_000,
+      },
+    });
+
+    const target = await resolveEnvironmentExecutionTarget({
+      db: {} as never,
+      companyId: "company-1",
+      adapterType: "codex_remote",
+      environment: {
+        id: "env-1",
+        driver: "sandbox",
+        config: {
+          provider: "cloudflare",
+        },
+      },
+      leaseId: "lease-1",
+      leaseMetadata: {
+        remoteCwd: "/workspace/paperclip",
+      },
+      lease: null,
+      environmentRuntime: null,
+    });
+
+    expect(target).toMatchObject({
+      kind: "remote",
+      transport: "sandbox",
+      providerKey: "cloudflare",
+      remoteCwd: "/workspace/paperclip",
+      leaseId: "lease-1",
+      environmentId: "env-1",
+    });
+  });
+
+  it("rejects sandbox execution targets for unsupported adapters", async () => {
+    const target = await resolveEnvironmentExecutionTarget({
+      db: {} as never,
+      companyId: "company-1",
+      adapterType: "external_test",
+      environment: {
+        id: "env-1",
+        driver: "sandbox",
+        config: {
+          provider: "fake-plugin",
+        },
+      },
+      leaseId: "lease-1",
+      leaseMetadata: {
+        remoteCwd: "/workspace/paperclip",
+      },
+      lease: null,
+      environmentRuntime: null,
+    });
+
+    expect(target).toBeNull();
+    expect(mockResolveEnvironmentDriverConfigForRuntime).not.toHaveBeenCalled();
+  });
+
   it("resolves SSH execution targets in bridge mode", async () => {
     mockResolveEnvironmentDriverConfigForRuntime.mockResolvedValue({
       driver: "ssh",
@@ -177,5 +240,50 @@ describe("resolveEnvironmentExecutionTarget", () => {
       },
     });
     expect(target).not.toHaveProperty("paperclipApiUrl");
+  });
+
+  it("resolves SSH execution targets for codex_remote", async () => {
+    mockResolveEnvironmentDriverConfigForRuntime.mockResolvedValue({
+      driver: "ssh",
+      config: {
+        host: "ssh.example.test",
+        port: 22,
+        username: "paperclip",
+        remoteWorkspacePath: "/srv/paperclip",
+        privateKey: "PRIVATE KEY",
+        knownHosts: "[ssh.example.test]:22 ssh-ed25519 AAAA",
+        strictHostKeyChecking: true,
+      },
+    });
+
+    const target = await resolveEnvironmentExecutionTarget({
+      db: {} as never,
+      companyId: "company-1",
+      adapterType: "codex_remote",
+      environment: {
+        id: "env-ssh-1",
+        driver: "ssh",
+        config: {},
+      },
+      leaseId: "lease-ssh-1",
+      leaseMetadata: {},
+      lease: null,
+      environmentRuntime: null,
+    });
+
+    expect(target).toMatchObject({
+      kind: "remote",
+      transport: "ssh",
+      remoteCwd: "/srv/paperclip",
+      leaseId: "lease-ssh-1",
+      environmentId: "env-ssh-1",
+      spec: {
+        host: "ssh.example.test",
+        port: 22,
+        username: "paperclip",
+        remoteWorkspacePath: "/srv/paperclip",
+        remoteCwd: "/srv/paperclip",
+      },
+    });
   });
 });

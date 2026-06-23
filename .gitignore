@@ -60,3 +60,6 @@ tests/release-smoke/playwright-report/
 .superpowers/
 .claude/worktrees/
 .herenow
+
+# Local session handoff notes (kept on disk, not committed)
+HANDOFF-*.md
