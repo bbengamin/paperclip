@@ -19,6 +19,7 @@ import {
   runAdapterExecutionTargetShellCommand,
   runAdapterExecutionTargetProcess,
   startAdapterExecutionTargetPaperclipBridge,
+  type AdapterSandboxExecutionTarget,
 } from "@paperclipai/adapter-utils/execution-target";
 import {
   asString,
@@ -123,6 +124,302 @@ type CodexRunAttempt = {
   rawStderr: string;
   parsed: ReturnType<typeof parseCodexJsonl>;
 };
+
+function posixShellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function sanitizeRemoteName(value: string): string {
+  const normalized = value.replace(/[^A-Za-z0-9._-]/g, "-").replace(/-+/g, "-");
+  return normalized.length > 0 ? normalized.slice(0, 120) : "run";
+}
+
+type CloudflareSandboxTarget = AdapterSandboxExecutionTarget & {
+  providerKey: "cloudflare";
+  runner: NonNullable<AdapterSandboxExecutionTarget["runner"]>;
+};
+
+function isCloudflareSandboxTarget(
+  target: ReturnType<typeof readAdapterExecutionTarget> | undefined,
+): target is CloudflareSandboxTarget {
+  return Boolean(
+    target &&
+      target.kind === "remote" &&
+      target.transport === "sandbox" &&
+      target.providerKey === "cloudflare" &&
+      target.runner,
+  );
+}
+
+function shouldUseCloudflareDurableExec(
+  target: ReturnType<typeof readAdapterExecutionTarget> | undefined,
+  config: Record<string, unknown>,
+): target is CloudflareSandboxTarget {
+  return isCloudflareSandboxTarget(target) && config.cloudflareDurableExec !== false;
+}
+
+function readPollIntervalMs(config: Record<string, unknown>): number {
+  const raw = Number(config.cloudflareDurablePollIntervalMs);
+  if (!Number.isFinite(raw) || raw <= 0) return 5_000;
+  return Math.min(Math.max(Math.trunc(raw), 250), 60_000);
+}
+
+function decodeBase64Field(value: string | undefined): string {
+  if (!value) return "";
+  return Buffer.from(value, "base64").toString("utf8");
+}
+
+function parseDurableStatus(text: string): {
+  state: "running" | "complete" | "lost" | "missing";
+  pid: number | null;
+  exitCode: number | null;
+  stdoutSize: number;
+  stderrSize: number;
+  stdoutChunk: string;
+  stderrChunk: string;
+} {
+  const fields = new Map<string, string>();
+  for (const line of text.split(/\r?\n/)) {
+    const idx = line.indexOf("=");
+    if (idx <= 0) continue;
+    fields.set(line.slice(0, idx), line.slice(idx + 1));
+  }
+  const readNumber = (key: string): number | null => {
+    const value = Number(fields.get(key));
+    return Number.isFinite(value) ? Math.trunc(value) : null;
+  };
+  const stateValue = fields.get("state");
+  const state =
+    stateValue === "complete" || stateValue === "lost" || stateValue === "missing"
+      ? stateValue
+      : "running";
+  return {
+    state,
+    pid: readNumber("pid"),
+    exitCode: readNumber("exitCode"),
+    stdoutSize: readNumber("stdoutSize") ?? 0,
+    stderrSize: readNumber("stderrSize") ?? 0,
+    stdoutChunk: decodeBase64Field(fields.get("stdoutChunkB64")),
+    stderrChunk: decodeBase64Field(fields.get("stderrChunkB64")),
+  };
+}
+
+async function executeCloudflareDurableCodex(input: {
+  runId: string;
+  target: CloudflareSandboxTarget;
+  command: string;
+  args: string[];
+  cwd: string;
+  env: Record<string, string>;
+  stdin: string;
+  timeoutSec: number;
+  pollIntervalMs: number;
+  onLog: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
+  onFirstOutput: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
+  logRemoteTiming: (message: string) => Promise<void>;
+}): Promise<RunProcessResult> {
+  if (!isCloudflareSandboxTarget(input.target)) {
+    throw new Error("Cloudflare durable Codex execution requires a Cloudflare sandbox target.");
+  }
+
+  const startedAt = new Date().toISOString();
+  const startedAtMs = Date.now();
+  const timeoutMs = input.timeoutSec > 0 ? input.timeoutSec * 1_000 : 0;
+  const runDir = path.posix.join(
+    input.target.remoteCwd,
+    ".paperclip-runtime",
+    "codex-runs",
+    sanitizeRemoteName(input.runId),
+  );
+  const bridgeEnv = { PAPERCLIP_SANDBOX_EXEC_CHANNEL: "bridge" };
+  const commandLine = [input.command, ...input.args].map(posixShellQuote).join(" ");
+  const startScript = [
+    "set -eu",
+    `run_dir=${posixShellQuote(runDir)}`,
+    `work_dir=${posixShellQuote(input.target.remoteCwd)}`,
+    'rm -rf "$run_dir"',
+    'mkdir -p "$run_dir"',
+    'cat > "$run_dir/stdin.txt"',
+    ': > "$run_dir/stdout.log"',
+    ': > "$run_dir/stderr.log"',
+    "set +e",
+    "(",
+    '  cd "$work_dir"',
+    `  ${commandLine} < "$run_dir/stdin.txt" > "$run_dir/stdout.log" 2> "$run_dir/stderr.log"`,
+    '  code=$?',
+    '  printf "%s\\n" "$code" > "$run_dir/exit_code"',
+    '  date +%s > "$run_dir/finished_at" 2>/dev/null || true',
+    ") &",
+    "pid=$!",
+    'printf "%s\\n" "$pid" > "$run_dir/pid"',
+    'printf "state=running\\npid=%s\\nrunDir=%s\\n" "$pid" "$run_dir"',
+  ].join("\n");
+
+  const startResult = await input.target.runner.execute({
+    command: "sh",
+    args: ["-c", startScript],
+    cwd: "/",
+    env: { ...input.env, ...bridgeEnv },
+    stdin: input.stdin,
+    timeoutMs: 30_000,
+  });
+  if (startResult.timedOut || (startResult.exitCode ?? 1) !== 0) {
+    return {
+      exitCode: startResult.exitCode ?? 1,
+      signal: startResult.signal,
+      timedOut: startResult.timedOut,
+      stdout: startResult.stdout,
+      stderr: startResult.stderr || "Failed to start Cloudflare durable Codex process.\n",
+      pid: null,
+      startedAt,
+    };
+  }
+
+  const startStatus = parseDurableStatus(startResult.stdout);
+  await input.logRemoteTiming(
+    `Cloudflare durable Codex process started pid=${startStatus.pid ?? "unknown"} runDir=${runDir}`,
+  );
+
+  let stdout = "";
+  let stderr = "";
+  let stdoutOffset = 0;
+  let stderrOffset = 0;
+  let firstOutputLogged = false;
+
+  const appendChunk = async (stream: "stdout" | "stderr", chunk: string) => {
+    if (!chunk) return;
+    if (!firstOutputLogged) {
+      firstOutputLogged = true;
+      await input.onFirstOutput(stream, chunk);
+    }
+    if (stream === "stdout") {
+      stdout += chunk;
+      await input.onLog("stdout", chunk);
+      return;
+    }
+    stderr += chunk;
+    await input.onLog("stderr", chunk);
+  };
+
+  const statusScript = [
+    "set -eu",
+    `run_dir=${posixShellQuote(runDir)}`,
+    `stdout_offset=${stdoutOffset}`,
+    `stderr_offset=${stderrOffset}`,
+    "if [ ! -d \"$run_dir\" ]; then",
+    "  printf 'state=missing\\n'",
+    "  exit 0",
+    "fi",
+    "pid=$(cat \"$run_dir/pid\" 2>/dev/null || true)",
+    "if [ -s \"$run_dir/exit_code\" ]; then",
+    "  state=complete",
+    "  exit_code=$(cat \"$run_dir/exit_code\" 2>/dev/null || printf '1')",
+    "elif [ -n \"$pid\" ] && kill -0 \"$pid\" 2>/dev/null; then",
+    "  state=running",
+    "  exit_code=",
+    "else",
+    "  state=lost",
+    "  exit_code=1",
+    "fi",
+    "stdout_size=$(wc -c < \"$run_dir/stdout.log\" 2>/dev/null || printf '0')",
+    "stderr_size=$(wc -c < \"$run_dir/stderr.log\" 2>/dev/null || printf '0')",
+    "stdout_chunk=$(dd if=\"$run_dir/stdout.log\" bs=1 skip=\"$stdout_offset\" count=262144 2>/dev/null | base64 | tr -d '\\n')",
+    "stderr_chunk=$(dd if=\"$run_dir/stderr.log\" bs=1 skip=\"$stderr_offset\" count=262144 2>/dev/null | base64 | tr -d '\\n')",
+    "printf 'state=%s\\npid=%s\\nexitCode=%s\\nstdoutSize=%s\\nstderrSize=%s\\nstdoutChunkB64=%s\\nstderrChunkB64=%s\\n' \"$state\" \"$pid\" \"$exit_code\" \"$stdout_size\" \"$stderr_size\" \"$stdout_chunk\" \"$stderr_chunk\"",
+  ];
+
+  const buildStatusScript = () =>
+    statusScript
+      .map((line) => {
+        if (line.startsWith("stdout_offset=")) return `stdout_offset=${stdoutOffset}`;
+        if (line.startsWith("stderr_offset=")) return `stderr_offset=${stderrOffset}`;
+        return line;
+      })
+      .join("\n");
+
+  const cleanup = async () => {
+    const cleanupScript = [
+      "set +e",
+      `run_dir=${posixShellQuote(runDir)}`,
+      'pid=$(cat "$run_dir/pid" 2>/dev/null || true)',
+      '[ -n "$pid" ] && kill "$pid" 2>/dev/null || true',
+      "sleep 2",
+      '[ -n "$pid" ] && kill -9 "$pid" 2>/dev/null || true',
+    ].join("\n");
+    await input.target.runner.execute({
+      command: "sh",
+      args: ["-c", cleanupScript],
+      cwd: "/",
+      env: bridgeEnv,
+      timeoutMs: 10_000,
+    }).catch(() => undefined);
+  };
+
+  while (true) {
+    if (timeoutMs > 0 && Date.now() - startedAtMs > timeoutMs) {
+      await cleanup();
+      return {
+        exitCode: null,
+        signal: null,
+        timedOut: true,
+        stdout,
+        stderr,
+        pid: null,
+        startedAt,
+      };
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, input.pollIntervalMs));
+    const statusResult = await input.target.runner.execute({
+      command: "sh",
+      args: ["-c", buildStatusScript()],
+      cwd: "/",
+      env: bridgeEnv,
+      timeoutMs: 30_000,
+    });
+    if (statusResult.timedOut || (statusResult.exitCode ?? 1) !== 0) {
+      stderr += statusResult.stderr;
+      await input.logRemoteTiming(
+        `Cloudflare durable Codex status poll failed exit=${statusResult.exitCode ?? "null"} timedOut=${statusResult.timedOut}`,
+      );
+      continue;
+    }
+
+    const status = parseDurableStatus(statusResult.stdout);
+    await appendChunk("stdout", status.stdoutChunk);
+    await appendChunk("stderr", status.stderrChunk);
+    stdoutOffset += Buffer.byteLength(status.stdoutChunk, "utf8");
+    stderrOffset += Buffer.byteLength(status.stderrChunk, "utf8");
+
+    if (status.state === "running") continue;
+    if (stdoutOffset < status.stdoutSize || stderrOffset < status.stderrSize) continue;
+    if (status.state === "complete") {
+      return {
+        exitCode: status.exitCode ?? 0,
+        signal: null,
+        timedOut: false,
+        stdout,
+        stderr,
+        pid: null,
+        startedAt,
+      };
+    }
+
+    const reason =
+      status.state === "missing"
+        ? "Cloudflare durable Codex run directory disappeared."
+        : "Cloudflare durable Codex process disappeared before writing an exit code.";
+    return {
+      exitCode: 1,
+      signal: null,
+      timedOut: false,
+      stdout,
+      stderr: stderr + (stderr.endsWith("\n") || stderr.length === 0 ? "" : "\n") + `${reason}\n`,
+      pid: null,
+      startedAt,
+    };
+  }
+}
 
 async function runSandboxPaperclipPreflight(input: {
   runId: string;
@@ -1009,14 +1306,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const processStartedAt = Date.now();
     let proc: RunProcessResult;
     try {
-      proc = await runAdapterExecutionTargetProcess(runId, runtimeExecutionTarget, command, args, {
-        cwd,
-        env,
-        stdin: prompt,
-        timeoutSec,
-        graceSec,
-        onSpawn,
-        onLog: async (stream, chunk) => {
+      const handleLogChunk = async (stream: "stdout" | "stderr", chunk: string) => {
           if (!firstOutputLogged && chunk.length > 0) {
             firstOutputLogged = true;
             await logRemoteTiming(`first Codex ${stream} chunk received (${Buffer.byteLength(chunk, "utf8")} bytes)`);
@@ -1028,8 +1318,41 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           const cleaned = stripCodexRolloutNoise(chunk);
           if (!cleaned.trim()) return;
           await onLog(stream, cleaned);
-        },
-      });
+      };
+      if (shouldUseCloudflareDurableExec(runtimeExecutionTarget, config)) {
+        await logRemoteTiming(
+          `using Cloudflare durable Codex execution pollIntervalMs=${readPollIntervalMs(config)}`,
+        );
+        proc = await executeCloudflareDurableCodex({
+          runId,
+          target: runtimeExecutionTarget,
+          command,
+          args,
+          cwd,
+          env,
+          stdin: prompt,
+          timeoutSec,
+          pollIntervalMs: readPollIntervalMs(config),
+          onLog: handleLogChunk,
+          onFirstOutput: async (stream, chunk) => {
+            if (!firstOutputLogged && chunk.length > 0) {
+              firstOutputLogged = true;
+              await logRemoteTiming(`first Codex ${stream} chunk received (${Buffer.byteLength(chunk, "utf8")} bytes)`);
+            }
+          },
+          logRemoteTiming,
+        });
+      } else {
+        proc = await runAdapterExecutionTargetProcess(runId, runtimeExecutionTarget, command, args, {
+          cwd,
+          env,
+          stdin: prompt,
+          timeoutSec,
+          graceSec,
+          onSpawn,
+          onLog: handleLogChunk,
+        });
+      }
     } catch (error) {
       await logRemoteTiming(
         `Codex process threw after ${Date.now() - processStartedAt}ms: ${describeErrorForLogs(error)}`,
