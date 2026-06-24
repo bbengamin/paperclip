@@ -78,7 +78,7 @@ describe("createServerAdapter", () => {
 describe("applyCodexRemoteDefaults", () => {
   it("applies sandbox-only remote defaults", () => {
     const result = applyCodexRemoteDefaults({});
-    expect(result.timeoutSec).toBe(300);
+    expect(result.timeoutSec).toBe(1_800);
     expect(result.dangerouslyBypassApprovalsAndSandbox).toBe(true);
     expect(result.remoteWorkspaceSync).toBe(false);
   });
@@ -89,7 +89,7 @@ describe("applyCodexRemoteDefaults", () => {
   });
 
   it("replaces a non-positive timeout with the default", () => {
-    expect(applyCodexRemoteDefaults({ timeoutSec: 0 }).timeoutSec).toBe(300);
-    expect(applyCodexRemoteDefaults({ timeoutSec: -5 }).timeoutSec).toBe(300);
+    expect(applyCodexRemoteDefaults({ timeoutSec: 0 }).timeoutSec).toBe(1_800);
+    expect(applyCodexRemoteDefaults({ timeoutSec: -5 }).timeoutSec).toBe(1_800);
   });
 });

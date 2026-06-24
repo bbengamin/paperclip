@@ -31,7 +31,7 @@ import { models, modelProfiles, agentConfigurationDoc, type } from "../index.js"
 
 export const CODEX_REMOTE_TYPE = type;
 
-const DEFAULT_REMOTE_TIMEOUT_SEC = 300;
+const DEFAULT_REMOTE_TIMEOUT_SEC = 1_800;
 const CODEX_RUNTIME_PACKAGE = "@openai/codex";
 const CODEX_RUNTIME_FALLBACK_COMMAND = "codex";
 
