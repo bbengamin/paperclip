@@ -82,6 +82,37 @@ function firstNonEmptyLine(text: string): string {
   );
 }
 
+function describeCodexLaunchTarget(target: ReturnType<typeof readAdapterExecutionTarget> | undefined): string {
+  if (!target) return "target=local";
+  const parts = [
+    `target=${describeAdapterExecutionTarget(target)}`,
+    `kind=${target.kind}`,
+  ];
+  if (target.kind === "remote") {
+    parts.push(`transport=${target.transport}`);
+    parts.push(`remoteCwd=${target.remoteCwd}`);
+    if (target.environmentId) parts.push(`environmentId=${target.environmentId}`);
+    if (target.leaseId) parts.push(`leaseId=${target.leaseId}`);
+    if (target.transport === "sandbox") {
+      parts.push(`provider=${target.providerKey ?? "unknown"}`);
+      parts.push(`runner=${target.runner ? "yes" : "no"}`);
+      if (typeof target.timeoutMs === "number") parts.push(`providerTimeoutMs=${target.timeoutMs}`);
+    }
+  }
+  return parts.join(" ");
+}
+
+function describeErrorForLogs(error: unknown): string {
+  if (!(error instanceof Error)) return String(error);
+  const parts = [`${error.name}: ${error.message}`];
+  const stackLine = error.stack
+    ?.split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line.length > 0 && line !== parts[0]);
+  if (stackLine) parts.push(stackLine);
+  return parts.join(" ");
+}
+
 function hasNonEmptyEnvValue(env: Record<string, string>, key: string): boolean {
   const raw = env[key];
   return typeof raw === "string" && raw.trim().length > 0;
@@ -957,31 +988,65 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         promptMetrics,
         context,
       });
+      await logRemoteTiming("Codex execution metadata emitted");
     }
 
     let firstOutputLogged = false;
-    const proc = await runAdapterExecutionTargetProcess(runId, runtimeExecutionTarget, command, args, {
-      cwd,
-      env,
-      stdin: prompt,
-      timeoutSec,
-      graceSec,
-      onSpawn,
-      onLog: async (stream, chunk) => {
-        if (!firstOutputLogged && chunk.length > 0) {
-          firstOutputLogged = true;
-          await logRemoteTiming(`first Codex ${stream} chunk received (${Buffer.byteLength(chunk, "utf8")} bytes)`);
-        }
-        if (stream !== "stderr") {
-          await onLog(stream, chunk);
-          return;
-        }
-        const cleaned = stripCodexRolloutNoise(chunk);
-        if (!cleaned.trim()) return;
-        await onLog(stream, cleaned);
-      },
-    });
-    await logRemoteTiming(`Codex process completed exit=${proc.exitCode ?? "null"} timedOut=${proc.timedOut}`);
+    await logRemoteTiming(
+      [
+        "launching Codex process",
+        `command=${resolvedCommand}`,
+        `args=${args.length}`,
+        `cwd=${cwd}`,
+        `effectiveCwd=${effectiveExecutionCwd}`,
+        `timeoutSec=${timeoutSec}`,
+        `graceSec=${graceSec}`,
+        `promptChars=${prompt.length}`,
+        `resume=${resumeSessionId ?? "none"}`,
+        describeCodexLaunchTarget(runtimeExecutionTarget),
+      ].join(" "),
+    );
+    const processStartedAt = Date.now();
+    let proc: RunProcessResult;
+    try {
+      proc = await runAdapterExecutionTargetProcess(runId, runtimeExecutionTarget, command, args, {
+        cwd,
+        env,
+        stdin: prompt,
+        timeoutSec,
+        graceSec,
+        onSpawn,
+        onLog: async (stream, chunk) => {
+          if (!firstOutputLogged && chunk.length > 0) {
+            firstOutputLogged = true;
+            await logRemoteTiming(`first Codex ${stream} chunk received (${Buffer.byteLength(chunk, "utf8")} bytes)`);
+          }
+          if (stream !== "stderr") {
+            await onLog(stream, chunk);
+            return;
+          }
+          const cleaned = stripCodexRolloutNoise(chunk);
+          if (!cleaned.trim()) return;
+          await onLog(stream, cleaned);
+        },
+      });
+    } catch (error) {
+      await logRemoteTiming(
+        `Codex process threw after ${Date.now() - processStartedAt}ms: ${describeErrorForLogs(error)}`,
+      );
+      throw error;
+    }
+    await logRemoteTiming(
+      [
+        "Codex process completed",
+        `exit=${proc.exitCode ?? "null"}`,
+        `signal=${proc.signal ?? "null"}`,
+        `timedOut=${proc.timedOut}`,
+        `stdoutBytes=${Buffer.byteLength(proc.stdout, "utf8")}`,
+        `stderrBytes=${Buffer.byteLength(proc.stderr, "utf8")}`,
+        `durationMs=${Date.now() - processStartedAt}`,
+      ].join(" "),
+    );
     const cleanedStderr = stripCodexRolloutNoise(proc.stderr);
     return {
       proc: {
