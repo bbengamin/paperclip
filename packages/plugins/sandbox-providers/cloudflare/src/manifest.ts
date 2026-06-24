@@ -76,7 +76,7 @@ const manifest: PaperclipPluginManifestV1 = {
           },
           timeoutMs: {
             type: "number",
-            default: 1800000,
+            default: 300000,
             description: "Default per-command timeout passed through to the bridge.",
           },
           bridgeRequestTimeoutMs: {
