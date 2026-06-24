@@ -15,7 +15,7 @@
 
 import { execFile } from "node:child_process";
 import fs from "node:fs";
-import { readFile } from "node:fs/promises";
+import { readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { Router } from "express";
@@ -112,6 +112,14 @@ function readAdapterPackageVersionFromDisk(record: AdapterPluginRecord): string 
   } catch {
     return undefined;
   }
+}
+
+function resolveNpmAdapterPackageDir(packageName: string): string {
+  return path.resolve(getAdapterPluginsDir(), "node_modules", packageName);
+}
+
+function latestNpmPackageSpec(packageName: string): string {
+  return `${packageName}@latest`;
 }
 
 function buildAdapterCapabilities(adapter: ServerAdapterModule): AdapterCapabilities {
@@ -586,10 +594,13 @@ export function adapterRoutes() {
 
     try {
       const pluginsDir = getAdapterPluginsDir();
+      const packageDir = resolveNpmAdapterPackageDir(record.packageName);
+      const spec = latestNpmPackageSpec(record.packageName);
 
-      logger.info({ type, packageName: record.packageName }, "Reinstalling adapter package via npm");
+      logger.info({ type, packageName: record.packageName, spec, packageDir }, "Reinstalling adapter package via npm");
 
-      await execFileAsync("npm", ["install", "--no-save", record.packageName], {
+      await rm(packageDir, { recursive: true, force: true });
+      await execFileAsync("npm", ["install", "--no-save", spec], {
         cwd: pluginsDir,
         timeout: 120_000,
       });

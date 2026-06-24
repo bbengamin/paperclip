@@ -317,6 +317,22 @@ describe.sequential("adapter management route authorization", () => {
     }
   });
 
+  it("reinstalls npm adapters from the latest registry version", async () => {
+    resetInstalledExternalAdapterState();
+    seedInstalledExternalAdapter();
+    const app = createApp(instanceAdmin);
+
+    const res = await sendMutatingRequest(app, "reinstall");
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mocks.execFile).toHaveBeenCalledWith(
+      "npm",
+      ["install", "--no-save", `${EXTERNAL_PACKAGE_NAME}@latest`],
+      expect.objectContaining({ cwd: "/tmp/paperclip-adapter-route-authz-test" }),
+      expect.any(Function),
+    );
+  });
+
   it.each(["viewer", "operator"] as const)(
     "does not let a company %s trigger adapter npm install or reload",
     async (membershipRole) => {
