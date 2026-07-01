@@ -495,6 +495,7 @@ describe("codex remote execution", () => {
       },
       config: {
         command: "codex",
+        cloudflareDurableExec: false,
         env: {
           CODEX_HOME: codexHomeDir,
         },
@@ -543,5 +544,138 @@ describe("codex remote execution", () => {
         }),
       }),
     );
+  });
+
+  it("runs Cloudflare sandbox Codex through durable background polling", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-cloudflare-durable-"));
+    cleanupDirs.push(rootDir);
+    const workspaceDir = path.join(rootDir, "workspace");
+    const codexHomeDir = path.join(rootDir, "codex-home");
+    await mkdir(workspaceDir, { recursive: true });
+    await mkdir(codexHomeDir, { recursive: true });
+    await writeFile(path.join(codexHomeDir, "config.toml"), 'model = "gpt-5"\n', "utf8");
+    await writeFile(path.join(codexHomeDir, "auth.json"), "{}", "utf8");
+
+    prepareAdapterExecutionTargetRuntimeMock.mockResolvedValueOnce({
+      target: {
+        kind: "remote",
+        transport: "sandbox",
+        providerKey: "cloudflare",
+        leaseId: "lease-1",
+        remoteCwd: "/workspace/paperclip",
+      },
+      workspaceRemoteDir: "/workspace/paperclip",
+      runtimeRootDir: "/workspace/paperclip/.paperclip-runtime/codex",
+      assetDirs: {
+        home: "/workspace/paperclip/.paperclip-runtime/codex/home",
+      },
+      restoreWorkspace: async () => {},
+    });
+
+    const runnerExecute = vi.fn(async (input: { command: string; args?: string[]; stdin?: string; env?: Record<string, string> }) => {
+      const script = input.args?.[1] ?? "";
+      if (script.includes("cat > \"$run_dir/stdin.txt\"")) {
+        return {
+          exitCode: 0,
+          signal: null,
+          timedOut: false,
+          stdout: "state=running\npid=4321\nrunDir=/workspace/paperclip/.paperclip-runtime/codex-runs/run-cloudflare-durable\n",
+          stderr: "",
+          pid: null,
+          startedAt: new Date().toISOString(),
+        };
+      }
+      if (script.includes("stdoutChunkB64")) {
+        return {
+          exitCode: 0,
+          signal: null,
+          timedOut: false,
+          stdout: [
+            "state=complete",
+            "pid=4321",
+            "exitCode=0",
+            "stdoutSize=47",
+            "stderrSize=0",
+            `stdoutChunkB64=${Buffer.from('{"type":"thread.started","thread_id":"sess-1"}\n{"type":"item.completed","item":{"type":"agent_message","text":"done"}}\n').toString("base64")}`,
+            "stderrChunkB64=",
+            "",
+          ].join("\n"),
+          stderr: "",
+          pid: null,
+          startedAt: new Date().toISOString(),
+        };
+      }
+      return {
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        stdout: "",
+        stderr: "",
+        pid: null,
+        startedAt: new Date().toISOString(),
+      };
+    });
+    const logs: Array<{ stream: "stdout" | "stderr"; chunk: string }> = [];
+
+    const result = await execute({
+      runId: "run-cloudflare-durable",
+      agent: {
+        id: "agent-1",
+        companyId: "company-1",
+        name: "CodexCoder",
+        adapterType: "codex_remote",
+        adapterConfig: {},
+      },
+      runtime: {
+        sessionId: null,
+        sessionParams: null,
+        sessionDisplayId: null,
+        taskKey: null,
+      },
+      config: {
+        command: "codex",
+        cloudflareDurablePollIntervalMs: 1,
+        env: {
+          CODEX_HOME: codexHomeDir,
+        },
+      },
+      context: {
+        paperclipWorkspace: {
+          cwd: workspaceDir,
+          source: "project_primary",
+        },
+      },
+      executionTarget: {
+        kind: "remote",
+        transport: "sandbox",
+        providerKey: "cloudflare",
+        leaseId: "lease-1",
+        remoteCwd: "/workspace/paperclip",
+        runner: {
+          execute: runnerExecute,
+        },
+      },
+      onLog: async (stream, chunk) => {
+        logs.push({ stream, chunk });
+      },
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.sessionId).toBe("sess-1");
+    expect(result.summary).toBe("done");
+    expect(runAdapterExecutionTargetProcessMock).not.toHaveBeenCalled();
+    expect(runnerExecute).toHaveBeenCalledWith(expect.objectContaining({
+      env: expect.objectContaining({
+        PAPERCLIP_SANDBOX_EXEC_CHANNEL: "bridge",
+        CODEX_HOME: "/root/.codex",
+      }),
+      stdin: expect.any(String),
+      timeoutMs: 30_000,
+    }));
+    expect(runnerExecute).toHaveBeenCalledWith(expect.objectContaining({
+      env: { PAPERCLIP_SANDBOX_EXEC_CHANNEL: "bridge" },
+      timeoutMs: 30_000,
+    }));
+    expect(logs.some((entry) => entry.stream === "stdout" && entry.chunk.includes("thread.started"))).toBe(true);
   });
 });
