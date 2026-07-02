@@ -66,6 +66,8 @@ export const DEFAULT_SANDBOX_CALLBACK_BRIDGE_ROUTE_ALLOWLIST: readonly SandboxCa
   { method: "POST", path: /^\/api\/issues\/[^/]+\/release$/ },
   { method: "PATCH", path: /^\/api\/issues\/[^/]+$/ },
   { method: "GET", path: /^\/api\/issues\/[^/]+\/approvals$/ },
+  { method: "POST", path: /^\/api\/companies\/[^/]+\/issues\/[^/]+\/attachments$/ },
+  { method: "POST", path: /^\/api\/issues\/[^/]+\/work-products$/ },
 
   // Issue-thread interactions (suggest tasks, ask questions, request confirmation)
   { method: "GET", path: /^\/api\/issues\/[^/]+\/interactions(?:\/[^/]+)?$/ },
@@ -111,10 +113,11 @@ export interface SandboxCallbackBridgeRequest {
   query: string;
   headers: Record<string, string>;
   /**
-   * UTF-8 body contents. The bridge rejects non-JSON request bodies; binary
-   * payloads are intentionally out of scope for this queue protocol.
+   * Request body contents. JSON and other text bodies use UTF-8. Multipart
+   * artifact uploads use base64 so the queue protocol can carry binary bytes.
    */
   body: string;
+  bodyEncoding?: "utf8" | "base64";
   createdAt: string;
 }
 
@@ -1066,7 +1069,7 @@ async function readBody(req) {
       throw new Error("Bridge request body exceeded the configured size limit.");
     }
   }
-  return Buffer.concat(chunks).toString("utf8");
+  return Buffer.concat(chunks);
 }
 
 async function queueDepth() {
@@ -1115,10 +1118,12 @@ const server = createServer(async (req, res) => {
 
     const url = new URL(req.url || "/", "http://127.0.0.1");
     const contentType = typeof req.headers["content-type"] === "string" ? req.headers["content-type"] : "";
-    if (req.method && req.method !== "GET" && req.method !== "HEAD" && !/json/i.test(contentType)) {
+    const isJsonBody = /json/i.test(contentType);
+    const isMultipartBody = /^multipart\\/form-data(?:;|$)/i.test(contentType);
+    if (req.method && req.method !== "GET" && req.method !== "HEAD" && !isJsonBody && !isMultipartBody) {
       res.statusCode = 415;
       res.setHeader("content-type", "application/json");
-      res.end(JSON.stringify({ error: "Bridge only accepts JSON request bodies." }));
+      res.end(JSON.stringify({ error: "Bridge only accepts JSON or multipart request bodies." }));
       return;
     }
     const requestId = randomUUID();
@@ -1129,7 +1134,8 @@ const server = createServer(async (req, res) => {
       path: url.pathname,
       query: url.search,
       headers: normalizeHeaders(req.headers),
-      body: requestBody,
+      body: isMultipartBody ? requestBody.toString("base64") : requestBody.toString("utf8"),
+      bodyEncoding: isMultipartBody ? "base64" : "utf8",
       createdAt: new Date().toISOString(),
     };
     const requestPath = path.posix.join(requestsDir, \`\${requestId}.json\`);
