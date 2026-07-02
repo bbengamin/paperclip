@@ -185,9 +185,10 @@ export function injectWebsocketsDisabled(toml: string): string {
 
 /**
  * Builds a throwaway Codex home directory suitable for syncing into a remote
- * sandbox: the same auth/instructions as the managed home, but with a
- * sandbox-sanitized `config.toml` (see {@link sanitizeRemoteCodexConfigToml}).
- * The caller must invoke `cleanup()` when the run finishes.
+ * sandbox: the same instructions and skills as the managed home, but with a
+ * sandbox-sanitized `config.toml` (see {@link sanitizeRemoteCodexConfigToml})
+ * and no ChatGPT auth file. The caller must invoke `cleanup()` when the run
+ * finishes.
  */
 export async function prepareRemoteCodexHomeAsset(
   sourceHome: string,
@@ -211,6 +212,14 @@ export async function prepareRemoteCodexHomeAsset(
       if (await pathExists(src)) {
         await fs.copyFile(src, path.join(dir, name));
       }
+    }
+    const skillsSource = path.join(sourceHome, "skills");
+    if (await pathExists(skillsSource)) {
+      await fs.cp(skillsSource, path.join(dir, "skills"), {
+        recursive: true,
+        force: true,
+        dereference: true,
+      });
     }
     return { dir, cleanup };
   } catch (error) {
