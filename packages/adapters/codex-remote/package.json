@@ -1,6 +1,6 @@
 {
   "name": "@right-link/paperclip-plugin-codex-remote",
-  "version": "0.3.6",
+  "version": "0.3.7",
   "description": "Standalone external Codex sandbox adapter for Paperclip (fork add-on, installed via the adapter plugin store)",
   "license": "MIT",
   "homepage": "https://github.com/paperclipai/paperclip",
