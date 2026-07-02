@@ -1155,14 +1155,10 @@ export async function startAdapterExecutionTargetPaperclipBridge(input: {
         }
         headers.set("authorization", `Bearer ${hostApiToken}`);
         headers.set("x-paperclip-run-id", input.runId);
-        const requestBody =
-          request.bodyEncoding === "base64"
-            ? Buffer.from(request.body, "base64")
-            : request.body;
         const response = await fetch(buildBridgeForwardUrl(hostApiUrl, request), {
           method,
           headers,
-          ...(method === "GET" || method === "HEAD" ? {} : { body: requestBody }),
+          ...(method === "GET" || method === "HEAD" ? {} : { body: request.body }),
           signal: AbortSignal.timeout(30_000),
         });
         if (bridgeDebugEnabled) {

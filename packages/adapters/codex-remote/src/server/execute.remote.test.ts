@@ -10,7 +10,7 @@ const {
   prepareWorkspaceForSshExecution,
   restoreWorkspaceFromSshExecution,
   syncDirectoryToSsh,
-  startAdapterExecutionTargetPaperclipBridge,
+  startCodexRemotePaperclipBridge,
   prepareAdapterExecutionTargetRuntimeMock,
   ensureAdapterExecutionTargetCommandResolvableMock,
   runAdapterExecutionTargetShellCommand,
@@ -30,7 +30,7 @@ const {
   prepareWorkspaceForSshExecution: vi.fn(async () => ({ gitBacked: false })),
   restoreWorkspaceFromSshExecution: vi.fn(async () => undefined),
   syncDirectoryToSsh: vi.fn(async () => undefined),
-  startAdapterExecutionTargetPaperclipBridge: vi.fn(async () => ({
+  startCodexRemotePaperclipBridge: vi.fn(async () => ({
     env: {
       PAPERCLIP_API_URL: "http://127.0.0.1:4310",
       PAPERCLIP_API_KEY: "bridge-token",
@@ -92,9 +92,12 @@ vi.mock("@paperclipai/adapter-utils/execution-target", async () => {
       actual.runAdapterExecutionTargetProcess,
     ),
     runAdapterExecutionTargetShellCommand,
-    startAdapterExecutionTargetPaperclipBridge,
   };
 });
+
+vi.mock("./paperclip-bridge.js", () => ({
+  startCodexRemotePaperclipBridge,
+}));
 
 import { execute } from "./execute.js";
 
@@ -227,7 +230,7 @@ describe("codex remote execution", () => {
     expect(call?.[3].env.PAPERCLIP_API_KEY).toBe("agent-api-key");
     expect(call?.[3].env.PAPERCLIP_API_BRIDGE_MODE).toBeUndefined();
     expect(call?.[3].remoteExecution?.remoteCwd).toBe(managedRemoteWorkspace);
-    expect(startAdapterExecutionTargetPaperclipBridge).not.toHaveBeenCalled();
+    expect(startCodexRemotePaperclipBridge).not.toHaveBeenCalled();
     expect(restoreWorkspaceFromSshExecution).toHaveBeenCalledTimes(1);
     expect(restoreWorkspaceFromSshExecution).toHaveBeenCalledWith(expect.objectContaining({
       localDir: workspaceDir,

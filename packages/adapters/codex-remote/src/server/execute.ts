@@ -18,7 +18,6 @@ import {
   resolveAdapterExecutionTargetCommandForLogs,
   runAdapterExecutionTargetShellCommand,
   runAdapterExecutionTargetProcess,
-  startAdapterExecutionTargetPaperclipBridge,
 } from "@paperclipai/adapter-utils/execution-target";
 import {
   asString,
@@ -51,6 +50,7 @@ import { resolveCodexDesiredSkillNames } from "./skills.js";
 import { buildCodexExecArgs } from "./codex-args.js";
 import { applyTailscaleProxyEnv, ensureSandboxTailscaleUp, readTailscaleAuthKey } from "./tailscale.js";
 import { stripNonPosixSandboxEnvKeys } from "./sandbox-env.js";
+import { startCodexRemotePaperclipBridge } from "./paperclip-bridge.js";
 import { SANDBOX_INSTALL_COMMAND } from "../index.js";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
@@ -639,7 +639,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const restoreRemoteWorkspace = preparedExecutionTargetRuntime && !skipRemoteWorkspaceSync
     ? () => preparedExecutionTargetRuntime.restoreWorkspace()
     : null;
-  let paperclipBridge: Awaited<ReturnType<typeof startAdapterExecutionTargetPaperclipBridge>> = null;
+  let paperclipBridge: Awaited<ReturnType<typeof startCodexRemotePaperclipBridge>> = null;
   const remoteCodexHome = executionTargetIsRemote
     ? preparedExecutionTargetRuntime?.assetDirs.home ??
       path.posix.join(effectiveExecutionCwd, ".paperclip-runtime", "codex", "home")
@@ -748,11 +748,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const shouldUsePaperclipBridge =
     executionTargetIsSandbox && adapterExecutionTargetUsesPaperclipBridge(runtimeExecutionTarget);
   if (shouldUsePaperclipBridge) {
-    paperclipBridge = await startAdapterExecutionTargetPaperclipBridge({
+    paperclipBridge = await startCodexRemotePaperclipBridge({
       runId,
       target: runtimeExecutionTarget,
       runtimeRootDir: preparedExecutionTargetRuntime?.runtimeRootDir,
-      adapterKey: "codex",
       timeoutSec,
       hostApiToken: env.PAPERCLIP_API_KEY,
       onLog,

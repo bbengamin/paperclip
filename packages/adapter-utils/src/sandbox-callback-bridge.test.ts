@@ -154,7 +154,6 @@ describe("sandbox callback bridge", () => {
       query: string;
       headers: Record<string, string>;
       body: string;
-      bodyEncoding?: "utf8" | "base64";
     }> = [];
 
     const worker = await startSandboxCallbackBridgeWorker({
@@ -169,7 +168,6 @@ describe("sandbox callback bridge", () => {
           query: request.query,
           headers: request.headers,
           body: request.body,
-          bodyEncoding: request.bodyEncoding,
         });
         return {
           status: 200,
@@ -258,146 +256,6 @@ describe("sandbox callback bridge", () => {
     expect(seenRequests[0]?.headers.authorization).toBeUndefined();
     expect(seenRequests[0]?.headers["x-paperclip-run-id"]).toBeUndefined();
 
-  });
-
-  it("round-trips artifact upload multipart bytes and JSON work products through the default allowlist", async () => {
-    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-bridge-artifacts-"));
-    cleanupDirs.push(rootDir);
-
-    const localWorkspaceDir = path.join(rootDir, "local-workspace");
-    const remoteWorkspaceDir = path.join(rootDir, "remote-workspace");
-    await mkdir(localWorkspaceDir, { recursive: true });
-    await mkdir(remoteWorkspaceDir, { recursive: true });
-    await writeFile(path.join(localWorkspaceDir, "README.md"), "artifact bridge test\n", "utf8");
-
-    const runner = createExecRunner();
-    const bridgeAsset = await createSandboxCallbackBridgeAsset();
-    cleanupFns.push(bridgeAsset.cleanup);
-
-    const prepared = await prepareCommandManagedRuntime({
-      runner,
-      spec: {
-        remoteCwd: remoteWorkspaceDir,
-        timeoutMs: 30_000,
-      },
-      adapterKey: "codex",
-      workspaceLocalDir: localWorkspaceDir,
-      assets: [
-        {
-          key: "bridge",
-          localDir: bridgeAsset.localDir,
-        },
-      ],
-    });
-
-    const queueDir = path.posix.join(prepared.runtimeRootDir, "paperclip-bridge");
-    const bridgeToken = createSandboxCallbackBridgeToken();
-    const uploadedBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0x00, 0x41]);
-    const boundary = "paperclip-bridge-boundary";
-    const multipartBody = Buffer.concat([
-      Buffer.from(
-        `--${boundary}\r\n` +
-          `Content-Disposition: form-data; name="file"; filename="tiny.png"\r\n` +
-          `Content-Type: image/png\r\n\r\n`,
-        "utf8",
-      ),
-      uploadedBytes,
-      Buffer.from(`\r\n--${boundary}--\r\n`, "utf8"),
-    ]);
-    const seenRequests: Array<{
-      path: string;
-      contentType: string | undefined;
-      body: string;
-      bodyEncoding?: "utf8" | "base64";
-    }> = [];
-
-    const worker = await startSandboxCallbackBridgeWorker({
-      client: createFileSystemSandboxCallbackBridgeQueueClient(),
-      queueDir,
-      handleRequest: async (request) => {
-        seenRequests.push({
-          path: request.path,
-          contentType: request.headers["content-type"],
-          body: request.body,
-          bodyEncoding: request.bodyEncoding,
-        });
-        if (request.path.endsWith("/attachments")) {
-          expect(request.bodyEncoding).toBe("base64");
-          expect(Buffer.from(request.body, "base64")).toEqual(multipartBody);
-          return {
-            status: 201,
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ id: "attachment-1", contentPath: "/api/attachments/attachment-1/content" }),
-          };
-        }
-        expect(request.path).toBe("/api/issues/issue-1/work-products");
-        expect(request.bodyEncoding).toBe("utf8");
-        expect(JSON.parse(request.body)).toMatchObject({
-          type: "artifact",
-          provider: "paperclip",
-          metadata: { attachmentId: "attachment-1" },
-        });
-        return {
-          status: 201,
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ id: "work-product-1" }),
-        };
-      },
-    });
-    cleanupFns.push(async () => {
-      await worker.stop();
-    });
-
-    const bridge = await startSandboxCallbackBridgeServer({
-      runner,
-      remoteCwd: remoteWorkspaceDir,
-      assetRemoteDir: prepared.assetDirs.bridge,
-      queueDir,
-      bridgeToken,
-      timeoutMs: 30_000,
-    });
-    cleanupFns.push(async () => {
-      await bridge.stop();
-    });
-
-    const uploadResponse = await fetch(`${bridge.baseUrl}/api/companies/company-1/issues/issue-1/attachments`, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${bridgeToken}`,
-        "content-type": `multipart/form-data; boundary=${boundary}`,
-      },
-      body: multipartBody,
-    });
-    expect(uploadResponse.status).toBe(201);
-    await expect(uploadResponse.json()).resolves.toMatchObject({ id: "attachment-1" });
-
-    const workProductResponse = await fetch(`${bridge.baseUrl}/api/issues/issue-1/work-products`, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${bridgeToken}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        type: "artifact",
-        provider: "paperclip",
-        title: "tiny.png",
-        metadata: { attachmentId: "attachment-1" },
-      }),
-    });
-    expect(workProductResponse.status).toBe(201);
-    await expect(workProductResponse.json()).resolves.toMatchObject({ id: "work-product-1" });
-
-    expect(seenRequests).toHaveLength(2);
-    expect(seenRequests[0]).toMatchObject({
-      path: "/api/companies/company-1/issues/issue-1/attachments",
-      contentType: `multipart/form-data; boundary=${boundary}`,
-      bodyEncoding: "base64",
-    });
-    expect(seenRequests[1]).toMatchObject({
-      path: "/api/issues/issue-1/work-products",
-      contentType: "application/json",
-      bodyEncoding: "utf8",
-    });
   });
 
   it("denies non-allowlisted requests by default", async () => {
@@ -703,7 +561,7 @@ describe("sandbox callback bridge", () => {
     ).resolves.toEqual([]);
   });
 
-  it("rejects unsupported request bodies, enforces multipart body limits, and rejects full queues", async () => {
+  it("rejects non-JSON request bodies and full queues at the bridge server", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-bridge-server-guards-"));
     cleanupDirs.push(rootDir);
 
@@ -781,33 +639,7 @@ describe("sandbox callback bridge", () => {
     });
     expect(nonJsonResponse.status).toBe(415);
     await expect(nonJsonResponse.json()).resolves.toEqual({
-      error: "Bridge only accepts JSON or multipart request bodies.",
-    });
-
-    const limitedBridge = await startSandboxCallbackBridgeServer({
-      runner,
-      remoteCwd: remoteWorkspaceDir,
-      assetRemoteDir: prepared.assetDirs.bridge,
-      queueDir: path.posix.join(prepared.runtimeRootDir, "paperclip-bridge-limited"),
-      bridgeToken,
-      timeoutMs: 30_000,
-      maxBodyBytes: 16,
-    });
-    cleanupFns.push(async () => {
-      await limitedBridge.stop();
-    });
-
-    const oversizedMultipartResponse = await fetch(`${limitedBridge.baseUrl}/api/companies/company-1/issues/issue-1/attachments`, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${bridgeToken}`,
-        "content-type": "multipart/form-data; boundary=too-large",
-      },
-      body: "this multipart body is intentionally larger than sixteen bytes",
-    });
-    expect(oversizedMultipartResponse.status).toBe(502);
-    await expect(oversizedMultipartResponse.json()).resolves.toEqual({
-      error: "Bridge request body exceeded the configured size limit.",
+      error: "Bridge only accepts JSON request bodies.",
     });
   });
 
@@ -1064,8 +896,6 @@ describe("sandbox callback bridge", () => {
       { method: "POST", path: "/api/issues/issue-1/release" },
       { method: "PATCH", path: "/api/issues/issue-1" },
       { method: "GET", path: "/api/issues/issue-1/approvals" },
-      { method: "POST", path: "/api/companies/co-1/issues/issue-1/attachments" },
-      { method: "POST", path: "/api/issues/issue-1/work-products" },
       { method: "GET", path: "/api/issues/issue-1/interactions" },
       { method: "GET", path: "/api/issues/issue-1/interactions/inter-1" },
       { method: "POST", path: "/api/issues/issue-1/interactions" },
@@ -1108,9 +938,6 @@ describe("sandbox callback bridge", () => {
       { method: "POST", path: "/api/companies/co-1/exports" },
       { method: "POST", path: "/api/companies/co-1/imports/apply" },
       { method: "POST", path: "/api/companies/co-1/archive" },
-      { method: "DELETE", path: "/api/attachments/attachment-1" },
-      { method: "PATCH", path: "/api/work-products/work-product-1" },
-      { method: "DELETE", path: "/api/work-products/work-product-1" },
       { method: "DELETE", path: "/api/issues/issue-1/documents/plan" },
       { method: "DELETE", path: "/api/issues/issue-1/approvals/ap-1" },
       { method: "POST", path: "/api/approvals/ap-1/approve" },
