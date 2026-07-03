@@ -99,7 +99,7 @@ vi.mock("./paperclip-bridge.js", () => ({
   startCodexRemotePaperclipBridge,
 }));
 
-import { execute } from "./execute.js";
+import { execute, isRemoteTransportDropError } from "./execute.js";
 
 describe("codex remote execution", () => {
   const cleanupDirs: string[] = [];
@@ -546,5 +546,86 @@ describe("codex remote execution", () => {
         }),
       }),
     );
+  });
+
+  it("classifies a mid-run remote transport drop as a transient upstream error instead of failing", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-transport-drop-"));
+    cleanupDirs.push(rootDir);
+    const workspaceDir = path.join(rootDir, "workspace");
+    const codexHomeDir = path.join(rootDir, "codex-home");
+    await mkdir(workspaceDir, { recursive: true });
+    await mkdir(codexHomeDir, { recursive: true });
+    await writeFile(path.join(codexHomeDir, "auth.json"), "{}", "utf8");
+
+    // Reproduce the observed failure: the plugin-worker RPC carrying the long
+    // streamed exec dies mid-run and surfaces as a thrown transport error.
+    const transportError = Object.assign(new Error("Network connection lost"), {
+      name: "JsonRpcCallError",
+    });
+    runChildProcess.mockRejectedValueOnce(transportError);
+
+    const result = await execute({
+      runId: "run-transport-drop",
+      agent: {
+        id: "agent-1",
+        companyId: "company-1",
+        name: "CodexCoder",
+        adapterType: "codex_remote",
+        adapterConfig: {},
+      },
+      runtime: {
+        sessionId: null,
+        sessionParams: null,
+        sessionDisplayId: null,
+        taskKey: null,
+      },
+      config: {
+        command: "codex",
+        env: {
+          CODEX_HOME: codexHomeDir,
+        },
+      },
+      context: {
+        paperclipWorkspace: {
+          cwd: workspaceDir,
+          source: "project_primary",
+        },
+      },
+      executionTransport: {
+        remoteExecution: {
+          host: "127.0.0.1",
+          port: 2222,
+          username: "fixture",
+          remoteWorkspacePath: "/remote/workspace",
+          remoteCwd: "/remote/workspace",
+          privateKey: "PRIVATE KEY",
+          knownHosts: "[127.0.0.1]:2222 ssh-ed25519 AAAA",
+          strictHostKeyChecking: true,
+        },
+      },
+      onLog: async () => {},
+    });
+
+    expect(runChildProcess).toHaveBeenCalledTimes(1);
+    expect(result.errorCode).toBe("codex_remote_transport_lost");
+    expect(result.errorFamily).toBe("transient_upstream");
+    expect(result.timedOut).toBe(false);
+    expect(typeof result.retryNotBefore).toBe("string");
+    expect(result.errorMessage).toContain("Network connection lost");
+    // The workspace-restore in the finally block still runs so nothing leaks.
+    expect(restoreWorkspaceFromSshExecution).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not misclassify a normal non-zero Codex exit as a transport drop", () => {
+    expect(isRemoteTransportDropError(new Error("Codex exited with code 1"))).toBe(false);
+    expect(isRemoteTransportDropError(new Error("model refused the request"))).toBe(false);
+    expect(
+      isRemoteTransportDropError(Object.assign(new Error("Network connection lost"), { name: "JsonRpcCallError" })),
+    ).toBe(true);
+    expect(isRemoteTransportDropError(new Error("socket hang up"))).toBe(true);
+    expect(isRemoteTransportDropError(new Error("read ECONNRESET"))).toBe(true);
+    expect(
+      isRemoteTransportDropError({ message: "boom", cause: { code: "ECONNRESET" } }),
+    ).toBe(true);
   });
 });
