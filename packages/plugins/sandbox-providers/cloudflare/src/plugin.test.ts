@@ -275,6 +275,11 @@ describe("Cloudflare sandbox provider plugin", () => {
       sessionStrategy: "named",
       sessionId: "paperclip-bridge",
       env: {
+        PAPERCLIP_PREVIEW_ENVIRONMENT_TYPE: "cloudflare",
+        PAPERCLIP_CLOUDFLARE_BRIDGE_BASE_URL: "https://bridge.example.workers.dev",
+        PAPERCLIP_PROVIDER_LEASE_ID: "pc-run-1-abcd1234",
+        PAPERCLIP_PREVIEW_TARGET_ID: "pc-run-1-abcd1234",
+        PAPERCLIP_ENVIRONMENT_ID: "env-1",
         KEEP_ME: "visible",
       },
     });
@@ -322,6 +327,14 @@ describe("Cloudflare sandbox provider plugin", () => {
     });
 
     expect(requestBodyAt().streamOutput).toBe(true);
+    expect(requestBodyAt().env).toMatchObject({
+      PAPERCLIP_PREVIEW_ENVIRONMENT_TYPE: "cloudflare",
+      PAPERCLIP_CLOUDFLARE_BRIDGE_BASE_URL: "https://bridge.example.workers.dev",
+      PAPERCLIP_PROVIDER_LEASE_ID: "pc-run-1-abcd1234",
+      PAPERCLIP_PREVIEW_TARGET_ID: "pc-run-1-abcd1234",
+      PAPERCLIP_ENVIRONMENT_ID: "env-1",
+      KEEP_ME: "visible",
+    });
   });
 
   it("maps lost-lease execute errors into a deterministic command failure", async () => {

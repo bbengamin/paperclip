@@ -107,6 +107,19 @@ function sanitizeExecuteEnv(env: Record<string, string> | undefined) {
   return nextEnv;
 }
 
+function buildCloudflarePreviewEnv(
+  config: ReturnType<typeof parseCloudflareDriverConfig>,
+  params: PluginEnvironmentExecuteParams,
+): Record<string, string> {
+  return {
+    PAPERCLIP_PREVIEW_ENVIRONMENT_TYPE: "cloudflare",
+    PAPERCLIP_CLOUDFLARE_BRIDGE_BASE_URL: config.bridgeBaseUrl,
+    PAPERCLIP_PROVIDER_LEASE_ID: params.lease.providerLeaseId ?? "",
+    PAPERCLIP_PREVIEW_TARGET_ID: params.lease.providerLeaseId ?? "",
+    ...(params.environmentId ? { PAPERCLIP_ENVIRONMENT_ID: params.environmentId } : {}),
+  };
+}
+
 function logCloudflareExecChunk(
   logger: PluginLogger | null,
   stream: "stdout" | "stderr",
@@ -336,7 +349,10 @@ const plugin = definePlugin({
           command: params.command,
           args: params.args,
           cwd: params.cwd,
-          env: sanitizeExecuteEnv(params.env),
+          env: {
+            ...buildCloudflarePreviewEnv(config, params),
+            ...(sanitizeExecuteEnv(params.env) ?? {}),
+          },
           stdin: params.stdin ?? null,
           timeoutMs: params.timeoutMs ?? config.timeoutMs,
           sessionStrategy: session.sessionStrategy,
