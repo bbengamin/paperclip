@@ -161,6 +161,10 @@ export const queryKeys = {
   environments: {
     list: (companyId: string) => ["environments", companyId] as const,
     capabilities: (companyId: string) => ["environment-capabilities", companyId] as const,
+    customImageTemplate: (environmentId: string) =>
+      ["environments", environmentId, "custom-image-template"] as const,
+    customImageSetupSession: (sessionId: string) =>
+      ["environment-custom-image-setup-sessions", sessionId] as const,
   },
   projects: {
     list: (companyId: string) => ["projects", companyId] as const,
@@ -241,6 +245,10 @@ export const queryKeys = {
     providerConfigs: (companyId: string) => ["secret-provider-configs", companyId] as const,
     usage: (secretId: string) => ["secrets", "usage", secretId] as const,
     accessEvents: (secretId: string) => ["secrets", "access-events", secretId] as const,
+    userDefinitions: (companyId: string) => ["user-secret-definitions", companyId] as const,
+    userDefinitionCoverage: (companyId: string, definitionId: string) =>
+      ["user-secret-definitions", companyId, definitionId, "coverage"] as const,
+    myUserSecrets: (companyId: string) => ["my-user-secrets", companyId] as const,
   },
   companySearch: {
     search: (companyId: string, q: string, scope: string, limit: number, offset: number) =>

@@ -15,6 +15,7 @@ export interface HeartbeatRun {
   invocationSource: HeartbeatInvocationSource;
   triggerDetail: WakeupTriggerDetail | null;
   status: HeartbeatRunStatus;
+  responsibleUserId: string | null;
   startedAt: Date | null;
   finishedAt: Date | null;
   error: string | null;
@@ -64,6 +65,9 @@ export interface HeartbeatRun {
    */
   currentStatusMessage?: string | null;
   currentStatusUpdatedAt?: Date | string | null;
+  currentToolName?: string | null;
+  lastAssistantSnippet?: string | null;
+  lastEventAt?: Date | string | null;
 }
 
 /**
@@ -77,7 +81,8 @@ export type HeartbeatRunStatusPhase =
   | "adapter_startup"
   | "restore"
   | "export"
-  | "finalize";
+  | "finalize"
+  | "run_activity";
 
 export type HeartbeatRunOutputSilenceLevel =
   | "not_applicable"
