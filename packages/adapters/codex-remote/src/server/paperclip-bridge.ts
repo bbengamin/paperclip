@@ -376,7 +376,11 @@ const server = createServer(async (req, res) => {
     const contentType = typeof req.headers["content-type"] === "string" ? req.headers["content-type"] : "";
     const isJsonBody = /json/i.test(contentType);
     const isMultipartBody = /^multipart\\/form-data(?:;|$)/i.test(contentType);
-    if (req.method && req.method !== "GET" && req.method !== "HEAD" && !isJsonBody && !isMultipartBody) {
+    const contentLength = Number.parseInt(String(req.headers["content-length"] || "0"), 10);
+    const hasRequestBody =
+      (Number.isFinite(contentLength) && contentLength > 0) ||
+      typeof req.headers["transfer-encoding"] === "string";
+    if (req.method && req.method !== "GET" && req.method !== "HEAD" && hasRequestBody && !isJsonBody && !isMultipartBody) {
       res.statusCode = 415;
       res.setHeader("content-type", "application/json");
       res.end(JSON.stringify({ error: "Bridge only accepts JSON or multipart request bodies." }));
