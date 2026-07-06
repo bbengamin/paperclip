@@ -8,11 +8,13 @@ import {
   createSandboxCallbackBridgeToken,
   DEFAULT_SANDBOX_CALLBACK_BRIDGE_MAX_BODY_BYTES,
   DEFAULT_SANDBOX_CALLBACK_BRIDGE_ROUTE_ALLOWLIST,
+  sandboxCallbackBridgeDirectories,
   startSandboxCallbackBridgeServer,
   startSandboxCallbackBridgeWorker,
   type SandboxCallbackBridgeAsset,
   type SandboxCallbackBridgeRouteRule,
 } from "@paperclipai/adapter-utils/sandbox-callback-bridge";
+import { createSandboxRunLogTailFactory } from "@paperclipai/adapter-utils/sandbox-run-log-stream";
 import type {
   AdapterExecutionTarget,
   AdapterExecutionTargetPaperclipBridgeHandle,
@@ -261,12 +263,33 @@ export async function startCodexRemotePaperclipBridge(input: {
     throw error;
   }
 
+  // Sandbox providers deliver a command's stdout in a single batch at process
+  // exit, so without this codex_remote runs show no live progress (the UI sits
+  // on "Working" until Codex finishes). Mirror the upstream sandbox adapters:
+  // the tail factory wraps the Codex invocation to tee stdout/stderr into log
+  // files inside the sandbox and a host-side poll loop streams them
+  // incrementally. `runAdapterExecutionTargetProcess` consumes this via
+  // `options.runLogTail`.
+  const runLogTail =
+    target.streamRunLogs !== false
+      ? createSandboxRunLogTailFactory({
+          runner: target.runner,
+          remoteCwd: target.remoteCwd,
+          logsDir: sandboxCallbackBridgeDirectories(queueDir).logsDir,
+          shellCommand,
+        })
+      : null;
+  if (runLogTail) {
+    await onLog("stdout", "[paperclip] codex_remote sandbox run log streaming enabled for this run.\n");
+  }
+
   return {
     env: {
       PAPERCLIP_API_URL: server.baseUrl,
       PAPERCLIP_API_KEY: bridgeToken,
       PAPERCLIP_API_BRIDGE_MODE: "queue_v1",
     },
+    runLogTail,
     stop: async () => {
       await Promise.allSettled([server?.stop()]);
       await Promise.allSettled([worker?.stop(), bridgeAsset.cleanup()]);
