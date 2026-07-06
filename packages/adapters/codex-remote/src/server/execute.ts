@@ -18,7 +18,6 @@ import {
   resolveAdapterExecutionTargetCommandForLogs,
   runAdapterExecutionTargetShellCommand,
   runAdapterExecutionTargetProcess,
-  startAdapterExecutionTargetPaperclipBridge,
 } from "@paperclipai/adapter-utils/execution-target";
 import {
   asString,
@@ -51,6 +50,7 @@ import { resolveCodexDesiredSkillNames } from "./skills.js";
 import { buildCodexExecArgs } from "./codex-args.js";
 import { applyTailscaleProxyEnv, ensureSandboxTailscaleUp, readTailscaleAuthKey } from "./tailscale.js";
 import { stripNonPosixSandboxEnvKeys } from "./sandbox-env.js";
+import { startCodexRemotePaperclipBridge } from "./paperclip-bridge.js";
 import { SANDBOX_INSTALL_COMMAND } from "../index.js";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
@@ -116,6 +116,40 @@ function describeErrorForLogs(error: unknown): string {
 function hasNonEmptyEnvValue(env: Record<string, string>, key: string): boolean {
   const raw = env[key];
   return typeof raw === "string" && raw.trim().length > 0;
+}
+
+// Delay before the platform is allowed to retry a run that died from a remote
+// transport drop. Short, because the warm sandbox is usually still alive and a
+// resume can continue almost immediately.
+const REMOTE_TRANSPORT_DROP_RETRY_DELAY_MS = 15_000;
+
+// Signatures of a remote-execution *transport* failure — the sandbox link (SSH
+// channel, sandbox bridge SSE, or the plugin-worker RPC that carries the
+// streamed exec) dropped mid-run, as opposed to Codex itself exiting non-zero.
+// The observed shape is `JsonRpcCallError: Network connection lost` surfaced
+// from the plugin worker after several minutes of a long streamed exec.
+const REMOTE_TRANSPORT_DROP_RE =
+  /network connection lost|connection (?:lost|reset|closed|refused|aborted)|socket hang ?up|econnreset|econnrefused|econnaborted|epipe|fetch failed|premature close|stream (?:closed|ended|reset)|the operation was aborted|abort(?:ed|error)|jsonrpc\w*error|worker (?:exited|terminated|crashed|disconnected)|channel closed|websocket (?:closed|error)/i;
+
+export function isRemoteTransportDropError(error: unknown): boolean {
+  const parts: string[] = [];
+  const visit = (err: unknown, depth: number): void => {
+    if (err == null || depth > 4) return;
+    if (typeof err === "string") {
+      parts.push(err);
+      return;
+    }
+    if (typeof err !== "object") return;
+    const record = err as Record<string, unknown>;
+    for (const key of ["name", "message", "code", "type"]) {
+      const value = record[key];
+      if (typeof value === "string") parts.push(value);
+    }
+    if ("cause" in record) visit(record.cause, depth + 1);
+  };
+  visit(error, 0);
+  const haystack = parts.filter(Boolean).join(" ");
+  return haystack.length > 0 && REMOTE_TRANSPORT_DROP_RE.test(haystack);
 }
 
 type CodexRunAttempt = {
@@ -639,7 +673,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const restoreRemoteWorkspace = preparedExecutionTargetRuntime && !skipRemoteWorkspaceSync
     ? () => preparedExecutionTargetRuntime.restoreWorkspace()
     : null;
-  let paperclipBridge: Awaited<ReturnType<typeof startAdapterExecutionTargetPaperclipBridge>> = null;
+  let paperclipBridge: Awaited<ReturnType<typeof startCodexRemotePaperclipBridge>> = null;
   const remoteCodexHome = executionTargetIsRemote
     ? preparedExecutionTargetRuntime?.assetDirs.home ??
       path.posix.join(effectiveExecutionCwd, ".paperclip-runtime", "codex", "home")
@@ -748,11 +782,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const shouldUsePaperclipBridge =
     executionTargetIsSandbox && adapterExecutionTargetUsesPaperclipBridge(runtimeExecutionTarget);
   if (shouldUsePaperclipBridge) {
-    paperclipBridge = await startAdapterExecutionTargetPaperclipBridge({
+    paperclipBridge = await startCodexRemotePaperclipBridge({
       runId,
       target: runtimeExecutionTarget,
       runtimeRootDir: preparedExecutionTargetRuntime?.runtimeRootDir,
-      adapterKey: "codex",
       timeoutSec,
       hostApiToken: env.PAPERCLIP_API_KEY,
       onLog,
@@ -1148,6 +1181,55 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     };
   };
 
+  // A remote transport drop (sandbox bridge / plugin-worker RPC dying mid-run)
+  // is infrastructure flakiness, not a Codex failure. Instead of surfacing it as
+  // a hard adapter failure, classify it as a transient upstream error and keep
+  // the Codex session so the platform retries — resuming the same session when
+  // the sandbox is still warm rather than restarting from scratch.
+  const buildRemoteTransportDropResult = (error: unknown): AdapterExecutionResult => {
+    const message = (error instanceof Error ? error.message : String(error)).trim();
+    const resumeSessionId = sessionId ?? runtimeSessionId ?? runtime.sessionId ?? null;
+    const resolvedSessionParams = resumeSessionId
+      ? ({
+          sessionId: resumeSessionId,
+          cwd: effectiveExecutionCwd,
+          ...(executionTargetIsRemote
+            ? { remoteExecution: adapterExecutionTargetSessionIdentity(runtimeExecutionTarget) }
+            : {}),
+          ...(workspaceId ? { workspaceId } : {}),
+          ...(workspaceRepoUrl ? { repoUrl: workspaceRepoUrl } : {}),
+          ...(workspaceRepoRef ? { repoRef: workspaceRepoRef } : {}),
+        } as Record<string, unknown>)
+      : null;
+    const retryNotBefore = new Date(Date.now() + REMOTE_TRANSPORT_DROP_RETRY_DELAY_MS).toISOString();
+    return {
+      exitCode: null,
+      signal: null,
+      timedOut: false,
+      errorMessage: message
+        ? `Remote sandbox transport dropped mid-run: ${message}`
+        : "Remote sandbox transport dropped mid-run.",
+      errorCode: "codex_remote_transport_lost",
+      errorFamily: "transient_upstream",
+      retryNotBefore,
+      sessionId: resumeSessionId,
+      sessionParams: resolvedSessionParams,
+      sessionDisplayId: resumeSessionId,
+      provider: "openai",
+      biller: resolveCodexBiller(effectiveEnv, billingType),
+      model,
+      billingType,
+      costUsd: null,
+      clearSession: false,
+      resultJson: {
+        phase: "codex_remote_transport_lost",
+        errorFamily: "transient_upstream",
+        error: message,
+        retryNotBefore,
+      },
+    };
+  };
+
   try {
     // Bring up Tailscale before anything talks to the model provider. No-op
     // unless this is a sandbox with TAILSCALE_AUTHKEY set; throws on failure so
@@ -1190,6 +1272,17 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     }
 
     return toResult(initial, false, false);
+  } catch (error) {
+    // Only remote runs can suffer a transport drop; for local runs (or any
+    // other error shape) preserve the original failure.
+    if (executionTargetIsRemote && isRemoteTransportDropError(error)) {
+      await onLog(
+        "stderr",
+        `[paperclip] codex_remote remote transport dropped mid-run; classifying as a transient upstream error so the run is retried (and resumed if the sandbox is still warm) instead of hard-failing: ${describeErrorForLogs(error)}\n`,
+      );
+      return buildRemoteTransportDropResult(error);
+    }
+    throw error;
   } finally {
     if (paperclipBridge) {
       await paperclipBridge.stop();

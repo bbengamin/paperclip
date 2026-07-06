@@ -136,6 +136,45 @@ describe("prepareRemoteCodexHomeAsset", () => {
       await fs.rm(root, { recursive: true, force: true });
     }
   });
+
+  it("copies managed skills into the sandbox home asset without copying auth.json", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-remote-home-"));
+    const sourceHome = path.join(root, "source");
+    const skillDir = path.join(sourceHome, "skills", "durable-artifact-upload");
+    await fs.mkdir(skillDir, { recursive: true });
+    await fs.writeFile(
+      path.join(sourceHome, "config.toml"),
+      [
+        'model_provider = "cliproxyapi"',
+        "[model_providers.cliproxyapi]",
+        'base_url = "http://proxy/v1"',
+      ].join("\n"),
+      "utf8",
+    );
+    await fs.writeFile(path.join(sourceHome, "auth.json"), '{"auth_mode":"chatgpt"}\n', "utf8");
+    await fs.writeFile(
+      path.join(skillDir, "SKILL.md"),
+      [
+        "---",
+        "name: durable-artifact-upload",
+        "---",
+        "",
+        "# Durable Artifact Upload",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const asset = await prepareRemoteCodexHomeAsset(sourceHome);
+    try {
+      await expect(pathExists(path.join(asset.dir, "auth.json"))).resolves.toBe(false);
+      await expect(
+        fs.readFile(path.join(asset.dir, "skills", "durable-artifact-upload", "SKILL.md"), "utf8"),
+      ).resolves.toContain("Durable Artifact Upload");
+    } finally {
+      await asset.cleanup();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("codex managed home", () => {

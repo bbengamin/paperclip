@@ -57,6 +57,25 @@ and registers the `codex_remote` adapter type.
 5. The agent calls Paperclip via the bridge (fetch issue context, post comments,
    `PATCH` issue status) and finalizes its own work.
 
+## Artifact upload validation
+
+Use this recipe after changing the sandbox callback bridge or artifact helper
+path:
+
+1. Start a real `codex_remote` task on the Cloudflare sandbox provider.
+2. In the sandbox, create or capture a small PNG below the bridge body limit.
+3. Run the bundled helper from the checked-out repo:
+
+   ```sh
+   skills/paperclip/scripts/paperclip-upload-artifact.sh tiny.png \
+     --title "codex_remote artifact smoke PNG" \
+     --summary "Small PNG uploaded through the sandbox callback bridge"
+   ```
+
+4. Add the helper's final comment snippet to the issue.
+5. Let the sandbox tear down, then confirm the Paperclip attachment/work-product
+   link still opens from the issue.
+
 ## Configuration
 
 See `agentConfigurationDoc` (exported from `./meta`) for the full field list.
