@@ -3,6 +3,13 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+// Must be set before ./execute.js is imported: the silent-window heartbeat
+// interval is read at module load. 100ms keeps the heartbeat test fast on
+// real timers (fake timers starve execute()'s real fs I/O during setup).
+vi.hoisted(() => {
+  process.env.PAPERCLIP_CODEX_SILENT_HEARTBEAT_MS = "100";
+});
+
 const {
   runChildProcess,
   ensureCommandResolvable,
@@ -614,6 +621,107 @@ describe("codex remote execution", () => {
     expect(result.errorMessage).toContain("Network connection lost");
     // The workspace-restore in the finally block still runs so nothing leaks.
     expect(restoreWorkspaceFromSshExecution).toHaveBeenCalledTimes(1);
+  });
+
+  it("logs a heartbeat while a remote Codex process stays silent", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-silent-heartbeat-"));
+    cleanupDirs.push(rootDir);
+    const workspaceDir = path.join(rootDir, "workspace");
+    const codexHomeDir = path.join(rootDir, "codex-home");
+    await mkdir(workspaceDir, { recursive: true });
+    await mkdir(codexHomeDir, { recursive: true });
+    await writeFile(path.join(codexHomeDir, "auth.json"), "{}", "utf8");
+
+    // Codex launches but produces no output (observed live: the sandbox
+    // control plane buffered ~5 minutes of stdout before delivering it).
+    let resolveProc!: (value: {
+      exitCode: number;
+      signal: null;
+      timedOut: boolean;
+      stdout: string;
+      stderr: string;
+      pid: number;
+      startedAt: string;
+    }) => void;
+    runChildProcess.mockImplementationOnce(
+      () => new Promise((resolve) => { resolveProc = resolve; }) as never,
+    );
+
+    const logs: string[] = [];
+    const resultPromise = execute({
+        runId: "run-silent-heartbeat",
+        agent: {
+          id: "agent-1",
+          companyId: "company-1",
+          name: "CodexCoder",
+          adapterType: "codex_remote",
+          adapterConfig: {},
+        },
+        runtime: {
+          sessionId: null,
+          sessionParams: null,
+          sessionDisplayId: null,
+          taskKey: null,
+        },
+        config: {
+          command: "codex",
+          env: {
+            CODEX_HOME: codexHomeDir,
+          },
+        },
+        context: {
+          paperclipWorkspace: {
+            cwd: workspaceDir,
+            source: "project_primary",
+          },
+        },
+        executionTransport: {
+          remoteExecution: {
+            host: "127.0.0.1",
+            port: 2222,
+            username: "fixture",
+            remoteWorkspacePath: "/remote/workspace",
+            remoteCwd: "/remote/workspace",
+            privateKey: "PRIVATE KEY",
+            knownHosts: "[127.0.0.1]:2222 ssh-ed25519 AAAA",
+            strictHostKeyChecking: true,
+          },
+        },
+      onLog: async (_stream, chunk) => {
+        logs.push(chunk);
+      },
+    });
+
+    // Wait (real timers, 100ms heartbeat interval via env override) until the
+    // launch happened and at least two heartbeats fired during the silence.
+    const waitFor = async (predicate: () => boolean, timeoutMs = 5_000) => {
+      const startedAt = Date.now();
+      while (!predicate()) {
+        if (Date.now() - startedAt > timeoutMs) throw new Error("timed out waiting for condition");
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    };
+    await waitFor(() => runChildProcess.mock.calls.length === 1);
+    await waitFor(() =>
+      logs.filter((line) => line.includes("still waiting for first Codex output")).length >= 2,
+    );
+
+    resolveProc({
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      stdout: "",
+      stderr: "",
+      pid: 123,
+      startedAt: new Date().toISOString(),
+    });
+    const result = await resultPromise;
+    expect(result.exitCode).toBe(0);
+
+    // Interval is cleared once the process settles: no further heartbeats.
+    const heartbeatCountAtExit = logs.filter((line) => line.includes("still waiting")).length;
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    expect(logs.filter((line) => line.includes("still waiting")).length).toBe(heartbeatCountAtExit);
   });
 
   it("does not misclassify a normal non-zero Codex exit as a transport drop", () => {

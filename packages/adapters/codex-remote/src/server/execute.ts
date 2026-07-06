@@ -118,6 +118,18 @@ function hasNonEmptyEnvValue(env: Record<string, string>, key: string): boolean 
   return typeof raw === "string" && raw.trim().length > 0;
 }
 
+// While a remote Codex process produces no output, log a heartbeat line every
+// interval. Two jobs: (1) make upstream output-delivery stalls visible in run
+// logs (observed live: the Cloudflare container control plane buffered ~187KB
+// of Codex stdout for ~5 minutes before delivering it as one chunk), and
+// (2) keep the run row's updatedAt fresh through the platform's output-progress
+// flush so staleness-based reapers never mistake a silent-but-alive remote run
+// for a dead one. The env override exists for tests.
+const CODEX_SILENT_WINDOW_HEARTBEAT_MS = (() => {
+  const value = Number(process.env.PAPERCLIP_CODEX_SILENT_HEARTBEAT_MS);
+  return Number.isFinite(value) && value > 0 ? Math.trunc(value) : 60_000;
+})();
+
 // Delay before the platform is allowed to retry a run that died from a remote
 // transport drop. Short, because the warm sandbox is usually still alive and a
 // resume can continue almost immediately.
@@ -1040,6 +1052,18 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       ].join(" "),
     );
     const processStartedAt = Date.now();
+    let lastOutputAt: number | null = null;
+    const silentWindowHeartbeat = executionTargetIsRemote
+      ? setInterval(() => {
+          const sinceOutputMs = Date.now() - (lastOutputAt ?? processStartedAt);
+          if (sinceOutputMs < CODEX_SILENT_WINDOW_HEARTBEAT_MS) return;
+          void logRemoteTiming(
+            lastOutputAt === null
+              ? `still waiting for first Codex output (${sinceOutputMs}ms since launch); Codex is likely running with output buffered upstream`
+              : `no Codex output for ${sinceOutputMs}ms; process still running`,
+          ).catch(() => undefined);
+        }, CODEX_SILENT_WINDOW_HEARTBEAT_MS)
+      : null;
     let proc: RunProcessResult;
     try {
       proc = await runAdapterExecutionTargetProcess(runId, runtimeExecutionTarget, command, args, {
@@ -1050,6 +1074,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         graceSec,
         onSpawn,
         onLog: async (stream, chunk) => {
+          if (chunk.length > 0) {
+            lastOutputAt = Date.now();
+          }
           if (!firstOutputLogged && chunk.length > 0) {
             firstOutputLogged = true;
             await logRemoteTiming(`first Codex ${stream} chunk received (${Buffer.byteLength(chunk, "utf8")} bytes)`);
@@ -1068,6 +1095,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         `Codex process threw after ${Date.now() - processStartedAt}ms: ${describeErrorForLogs(error)}`,
       );
       throw error;
+    } finally {
+      if (silentWindowHeartbeat) clearInterval(silentWindowHeartbeat);
     }
     await logRemoteTiming(
       [
