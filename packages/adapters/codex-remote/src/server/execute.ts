@@ -1074,6 +1074,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         timeoutSec,
         graceSec,
         onSpawn,
+        // Surface live runtime/sandbox progress to the UI (sync status, etc.),
+        // matching the local sandbox adapters. Without this the issue thread
+        // shows no activity signal while a remote run is in flight.
+        onRuntimeProgress: ctx.onRuntimeProgress,
         // Stream Codex's stdout/stderr incrementally from the sandbox instead of
         // waiting for the batched provider result at process exit. When present,
         // runAdapterExecutionTargetProcess wraps the command to tee output into
