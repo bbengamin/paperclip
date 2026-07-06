@@ -11,7 +11,6 @@ import {
 import {
   ensureAdapterExecutionTargetCommandResolvable,
   ensureAdapterExecutionTargetDirectory,
-  maybeRunSandboxInstallCommand,
   runAdapterExecutionTargetProcess,
   runAdapterExecutionTargetShellCommand,
   describeAdapterExecutionTarget,
@@ -22,7 +21,6 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { parseCodexJsonl } from "./parse.js";
-import { SANDBOX_INSTALL_COMMAND } from "../index.js";
 import { applyTailscaleProxyEnv, ensureSandboxTailscaleUp, readTailscaleAuthKey } from "./tailscale.js";
 import { stripNonPosixSandboxEnvKeys } from "./sandbox-env.js";
 import { codexHomeDir, readCodexAuthInfo } from "./quota.js";
@@ -491,7 +489,7 @@ async function prepareCodexHelloProbe(input: {
       // `.paperclip-runtime/runs/<runId>/workspace` to whatever it gets, so
       // pre-building a per-run path here would double-nest the run ID.
       workspaceRemoteDir: input.cwd,
-      installCommand: SANDBOX_INSTALL_COMMAND,
+      // Codex is baked into the remote image (pinned via apps.env); no runtime install.
       detectCommand: input.command,
       assets: [
         {
@@ -625,15 +623,9 @@ export async function testEnvironment(
       });
     }
   }
-  const installCheck = await maybeRunSandboxInstallCommand({
-    runId,
-    target,
-    adapterKey: "codex",
-    installCommand: SANDBOX_INSTALL_COMMAND,
-    detectCommand: command,
-    env,
-  });
-  if (installCheck) checks.push(installCheck);
+  // Codex is baked into the remote image (pinned via apps.env), so there is no
+  // runtime install step to diagnose here. Command resolvability below is the
+  // authoritative "is Codex present in the sandbox" check.
   try {
     await ensureAdapterExecutionTargetCommandResolvable(command, target, cwd, runtimeEnv);
     checks.push({

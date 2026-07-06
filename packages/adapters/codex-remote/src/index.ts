@@ -3,7 +3,13 @@ import type { AdapterModelProfileDefinition } from "@paperclipai/adapter-utils";
 export const type = "codex_remote";
 export const label = "Codex (remote)";
 
-export const SANDBOX_INSTALL_COMMAND = "npm install -g @openai/codex";
+// NOTE: Codex is baked into the remote images (SSH + Cloudflare) at a pinned
+// version via paperclip-enviroment `tooling/apps.env` (CODEX_VERSION), so the
+// adapter no longer installs it at runtime. A runtime `npm i -g @openai/codex`
+// tracked npm `latest` and would overwrite the image's pinned version on every
+// run — the suspected cause of the 2026-07-06 stdout-streaming regression. If a
+// sandbox image is ever missing Codex, `ensureAdapterExecutionTargetCommandResolvable`
+// surfaces a clear "command not found" error instead of silently reinstalling.
 
 export const DEFAULT_CODEX_REMOTE_MODEL = "gpt-5.3-codex";
 export const DEFAULT_CODEX_REMOTE_BYPASS_APPROVALS_AND_SANDBOX = true;

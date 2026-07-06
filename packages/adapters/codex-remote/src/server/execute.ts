@@ -51,7 +51,6 @@ import { buildCodexExecArgs } from "./codex-args.js";
 import { applyTailscaleProxyEnv, ensureSandboxTailscaleUp, readTailscaleAuthKey } from "./tailscale.js";
 import { stripNonPosixSandboxEnvKeys } from "./sandbox-env.js";
 import { startCodexRemotePaperclipBridge } from "./paperclip-bridge.js";
-import { SANDBOX_INSTALL_COMMAND } from "../index.js";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const SANDBOX_GLOBAL_CODEX_HOME = "/root/.codex";
@@ -656,7 +655,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           ...(skipRemoteWorkspaceSync
             ? { workspaceRemoteDir: effectiveExecutionCwd, syncWorkspace: false }
             : {}),
-          installCommand: SANDBOX_INSTALL_COMMAND,
+          // Codex is baked into the remote image (pinned via apps.env); do not
+          // reinstall it at runtime. detectCommand still lets the runtime verify
+          // the binary is present without triggering an install.
           detectCommand: command,
           assets: [
             {
