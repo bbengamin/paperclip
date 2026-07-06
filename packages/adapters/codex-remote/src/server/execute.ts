@@ -1074,6 +1074,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         timeoutSec,
         graceSec,
         onSpawn,
+        // Stream Codex's stdout/stderr incrementally from the sandbox instead of
+        // waiting for the batched provider result at process exit. When present,
+        // runAdapterExecutionTargetProcess wraps the command to tee output into
+        // tailable log files and streams them through onLog during the run.
+        runLogTail: paperclipBridge?.runLogTail,
         onLog: async (stream, chunk) => {
           if (chunk.length > 0) {
             lastOutputAt = Date.now();

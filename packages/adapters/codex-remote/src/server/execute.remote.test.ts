@@ -555,6 +555,93 @@ describe("codex remote execution", () => {
     );
   });
 
+  it("forwards the sandbox bridge runLogTail into the Codex exec for live streaming", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-runlogtail-"));
+    cleanupDirs.push(rootDir);
+    const workspaceDir = path.join(rootDir, "workspace");
+    const codexHomeDir = path.join(rootDir, "codex-home");
+    await mkdir(workspaceDir, { recursive: true });
+    await mkdir(codexHomeDir, { recursive: true });
+    await writeFile(path.join(codexHomeDir, "config.toml"), 'model = "gpt-5"\n', "utf8");
+    await writeFile(path.join(codexHomeDir, "auth.json"), "{}", "utf8");
+
+    prepareAdapterExecutionTargetRuntimeMock.mockResolvedValueOnce({
+      target: {
+        kind: "remote",
+        transport: "sandbox",
+        providerKey: "cloudflare",
+        leaseId: "lease-1",
+        remoteCwd: "/workspace/paperclip",
+      },
+      workspaceRemoteDir: "/workspace/paperclip",
+      runtimeRootDir: "/workspace/paperclip/.paperclip-runtime/codex",
+      assetDirs: { home: "/workspace/paperclip/.paperclip-runtime/codex/home" },
+      restoreWorkspace: async () => {},
+    });
+
+    // The forked codex_remote bridge now creates a run-log tail factory; execute
+    // must forward it so runAdapterExecutionTargetProcess streams incrementally
+    // instead of waiting for the batched provider result.
+    const runLogTailSentinel = { create: vi.fn() };
+    startCodexRemotePaperclipBridge.mockResolvedValueOnce({
+      env: {
+        PAPERCLIP_API_URL: "http://127.0.0.1:4310",
+        PAPERCLIP_API_KEY: "bridge-token",
+        PAPERCLIP_API_BRIDGE_MODE: "queue_v1",
+      },
+      runLogTail: runLogTailSentinel,
+      stop: async () => {},
+    } as never);
+
+    // Capture the exec options without invoking the real (sentinel-incompatible) runner path.
+    runAdapterExecutionTargetProcessMock.mockResolvedValueOnce({
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      stdout: "",
+      stderr: "",
+      pid: null,
+      startedAt: new Date().toISOString(),
+    });
+
+    await execute({
+      runId: "run-runlogtail",
+      agent: {
+        id: "agent-1",
+        companyId: "company-1",
+        name: "CodexCoder",
+        adapterType: "codex_remote",
+        adapterConfig: {},
+      },
+      runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+      config: { command: "codex", env: { CODEX_HOME: codexHomeDir } },
+      context: { paperclipWorkspace: { cwd: workspaceDir, source: "project_primary" } },
+      executionTarget: {
+        kind: "remote",
+        transport: "sandbox",
+        providerKey: "cloudflare",
+        leaseId: "lease-1",
+        remoteCwd: "/workspace/paperclip",
+        runner: {
+          execute: vi.fn(async () => ({
+            exitCode: 0,
+            signal: null,
+            timedOut: false,
+            stdout: "",
+            stderr: "",
+            pid: null,
+            startedAt: new Date().toISOString(),
+          })),
+        },
+      },
+      onLog: async () => {},
+    });
+
+    expect(runAdapterExecutionTargetProcessMock).toHaveBeenCalled();
+    const call = runAdapterExecutionTargetProcessMock.mock.calls.at(-1);
+    expect(call?.[4]?.runLogTail).toBe(runLogTailSentinel);
+  });
+
   it("classifies a mid-run remote transport drop as a transient upstream error instead of failing", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-transport-drop-"));
     cleanupDirs.push(rootDir);
