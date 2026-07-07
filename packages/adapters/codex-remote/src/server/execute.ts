@@ -1,7 +1,8 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { inferOpenAiCompatibleBiller, type AdapterExecutionContext, type AdapterExecutionResult } from "@paperclipai/adapter-utils";
+import { inferOpenAiCompatibleBiller, type AdapterExecutionContext, type AdapterExecutionResult, type TranscriptEntry } from "@paperclipai/adapter-utils";
+import { parseCodexStdoutLine } from "../ui/parse-stdout.js";
 import {
   adapterExecutionTargetIsRemote,
   adapterExecutionTargetRemoteCwd,
@@ -79,6 +80,46 @@ function firstNonEmptyLine(text: string): string {
       .map((line) => line.trim())
       .find(Boolean) ?? ""
   );
+}
+
+// Safety cap so a pathological newline-less stdout stream can't grow the
+// runtime-status line buffer without bound. Normal Codex JSONL is newline
+// delimited, so the buffer only ever holds one partial line.
+const CODEX_STATUS_LINE_BUFFER_CAP_BYTES = 8 * 1024 * 1024;
+
+function truncateStatusText(text: string, max = 160): string {
+  const collapsed = text.replace(/\s+/g, " ").trim();
+  return collapsed.length > max ? `${collapsed.slice(0, max - 1)}…` : collapsed;
+}
+
+// Derive a human-readable runtime-status update from parsed Codex transcript
+// entries so the issue-thread status line advances past "Starting adapter in
+// sandbox" while the run streams (tool activity / assistant text), matching the
+// local adapters. Cosmetic — the run itself is unaffected. Returns the latest
+// meaningful update in the batch, or null if none.
+export function deriveCodexRuntimeStatusUpdate(
+  entries: TranscriptEntry[],
+): { message: string; currentToolName: string | null; lastAssistantSnippet: string | null } | null {
+  let update: { message: string; currentToolName: string | null; lastAssistantSnippet: string | null } | null = null;
+  for (const entry of entries) {
+    if (entry.kind === "tool_call") {
+      const name = (typeof entry.name === "string" && entry.name.trim()) || "tool";
+      const input = entry.input as Record<string, unknown> | undefined;
+      const command = input && typeof input.command === "string" ? input.command.trim() : "";
+      const message =
+        name === "command_execution" && command
+          ? `Running ${truncateStatusText(command, 120)}`
+          : `Using ${name}`;
+      update = { message, currentToolName: name, lastAssistantSnippet: null };
+    } else if (entry.kind === "assistant") {
+      const text = typeof entry.text === "string" ? entry.text : "";
+      if (text.trim()) {
+        const snippet = truncateStatusText(text);
+        update = { message: snippet, currentToolName: null, lastAssistantSnippet: snippet };
+      }
+    }
+  }
+  return update;
 }
 
 function describeCodexLaunchTarget(target: ReturnType<typeof readAdapterExecutionTarget> | undefined): string {
@@ -1054,6 +1095,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     );
     const processStartedAt = Date.now();
     let lastOutputAt: number | null = null;
+    // Buffers partial stdout between chunks so we only parse whole Codex JSONL
+    // lines when deriving the live runtime-status label.
+    let runtimeStatusLineBuffer = "";
     const silentWindowHeartbeat = executionTargetIsRemote
       ? setInterval(() => {
           const sinceOutputMs = Date.now() - (lastOutputAt ?? processStartedAt);
@@ -1092,6 +1136,35 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
             await logRemoteTiming(`first Codex ${stream} chunk received (${Buffer.byteLength(chunk, "utf8")} bytes)`);
           }
           if (stream !== "stderr") {
+            // Advance the issue-thread runtime-status label from live Codex
+            // output (tool activity / assistant text). Cosmetic and best-effort:
+            // never let a parse error interfere with forwarding the log itself.
+            if (ctx.onRuntimeProgress) {
+              try {
+                runtimeStatusLineBuffer += chunk;
+                if (runtimeStatusLineBuffer.length > CODEX_STATUS_LINE_BUFFER_CAP_BYTES) {
+                  const lastNewline = runtimeStatusLineBuffer.lastIndexOf("\n");
+                  runtimeStatusLineBuffer =
+                    lastNewline >= 0 ? runtimeStatusLineBuffer.slice(lastNewline + 1) : "";
+                }
+                const newlineIdx = runtimeStatusLineBuffer.lastIndexOf("\n");
+                if (newlineIdx >= 0) {
+                  const complete = runtimeStatusLineBuffer.slice(0, newlineIdx);
+                  runtimeStatusLineBuffer = runtimeStatusLineBuffer.slice(newlineIdx + 1);
+                  const ts = new Date().toISOString();
+                  const entries = complete
+                    .split("\n")
+                    .filter((line) => line.trim().length > 0)
+                    .flatMap((line) => parseCodexStdoutLine(line, ts));
+                  const update = deriveCodexRuntimeStatusUpdate(entries);
+                  if (update) {
+                    await ctx.onRuntimeProgress({ phase: "adapter_startup", ...update });
+                  }
+                }
+              } catch {
+                // best-effort; status is cosmetic
+              }
+            }
             await onLog(stream, chunk);
             return;
           }
