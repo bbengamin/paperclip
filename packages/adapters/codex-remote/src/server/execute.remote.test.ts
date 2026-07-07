@@ -106,7 +106,47 @@ vi.mock("./paperclip-bridge.js", () => ({
   startCodexRemotePaperclipBridge,
 }));
 
-import { execute, isRemoteTransportDropError } from "./execute.js";
+import { execute, isRemoteTransportDropError, deriveCodexRuntimeStatusUpdate } from "./execute.js";
+import { parseCodexStdoutLine } from "../ui/parse-stdout.js";
+
+describe("deriveCodexRuntimeStatusUpdate", () => {
+  const parse = (line: string) => parseCodexStdoutLine(line, "2026-07-06T00:00:00.000Z");
+
+  it("labels a command_execution tool call with the command", () => {
+    const entries = parse(
+      JSON.stringify({ type: "item.started", item: { id: "item_1", type: "command_execution", command: "npm ci" } }),
+    );
+    expect(deriveCodexRuntimeStatusUpdate(entries)).toEqual({
+      message: "Running npm ci",
+      currentToolName: "command_execution",
+      lastAssistantSnippet: null,
+    });
+  });
+
+  it("labels an assistant message with its text snippet", () => {
+    const entries = parse(
+      JSON.stringify({ type: "item.completed", item: { id: "item_0", type: "agent_message", text: "Cloning the repo now." } }),
+    );
+    expect(deriveCodexRuntimeStatusUpdate(entries)).toEqual({
+      message: "Cloning the repo now.",
+      currentToolName: null,
+      lastAssistantSnippet: "Cloning the repo now.",
+    });
+  });
+
+  it("returns null for non-meaningful events", () => {
+    expect(deriveCodexRuntimeStatusUpdate(parse(JSON.stringify({ type: "turn.started" })))).toBeNull();
+    expect(deriveCodexRuntimeStatusUpdate([])).toBeNull();
+  });
+
+  it("keeps the latest meaningful entry in a batch", () => {
+    const entries = [
+      ...parse(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "first" } })),
+      ...parse(JSON.stringify({ type: "item.started", item: { id: "x", type: "command_execution", command: "ls -la" } })),
+    ];
+    expect(deriveCodexRuntimeStatusUpdate(entries)?.message).toBe("Running ls -la");
+  });
+});
 
 describe("codex remote execution", () => {
   const cleanupDirs: string[] = [];
