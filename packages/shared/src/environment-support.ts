@@ -37,7 +37,6 @@ export interface EnvironmentCapabilities {
 }
 
 const REMOTE_MANAGED_ADAPTERS = new Set<AgentAdapterType>([
-  "acpx_local",
   "claude_local",
   "codex_local",
   // LOCAL TEST-BRANCH ONLY — upstream core gate has no extension seam for
@@ -47,6 +46,7 @@ const REMOTE_MANAGED_ADAPTERS = new Set<AgentAdapterType>([
   "codex_remote",
   "cursor",
   "gemini_local",
+  "grok_local",
   "opencode_local",
   "pi_local",
 ]);

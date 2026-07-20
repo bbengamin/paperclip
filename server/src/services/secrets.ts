@@ -26,6 +26,7 @@ import type {
   RemoteSecretImportRowResult,
   SecretProviderConfigDiscoveryPreviewResult,
   SecretBindingTargetType,
+  SecretProjectionClass,
   SecretProvider,
   SecretProviderConfigHealthResponse,
   SecretProviderConfigHealthStatus,
@@ -33,6 +34,7 @@ import type {
   SecretVersionSelector,
 } from "@paperclipai/shared";
 import {
+  CLASS3_STATIC_LEASE_ALLOWLIST,
   createSecretProviderConfigSchema,
   deriveProjectUrlKey,
   envBindingSchema,
@@ -131,6 +133,119 @@ function remoteProviderHttpError(error: unknown, context: {
   return new HttpError(502, "Remote secret provider request failed.", safeRemoteProviderErrorDetails(null, context));
 }
 
+function remoteProviderWriteHttpError(error: unknown, context: {
+  companyId: string;
+  provider: SecretProvider;
+  providerConfigId?: string | null;
+  providerConfig: SecretProviderVaultRuntimeConfig | null;
+  operation: string;
+}): HttpError {
+  return remoteProviderHttpError(error, {
+    companyId: context.companyId,
+    provider: context.provider,
+    providerConfigId: context.providerConfig?.id ?? context.providerConfigId ?? "deployment-default",
+    operation: context.operation,
+    providerConfig: context.providerConfig?.config ?? null,
+  });
+}
+
+async function throwProviderWriteOrReservedRowRollbackError(input: {
+  error: unknown;
+  rollbackReservedRow: () => Promise<unknown>;
+  companyId: string;
+  provider: SecretProvider;
+  providerConfigId?: string | null;
+  providerConfig: SecretProviderVaultRuntimeConfig | null;
+  operation: string;
+}): Promise<never> {
+  const providerError = remoteProviderWriteHttpError(input.error, input);
+  try {
+    await input.rollbackReservedRow();
+  } catch (rollbackError) {
+    const providerConfigId = input.providerConfig?.id ?? input.providerConfigId ?? "deployment-default";
+    logger.warn(
+      {
+        err: rollbackError,
+        providerErr: providerError,
+        companyId: input.companyId,
+        provider: input.provider,
+        providerConfigId,
+        operation: input.operation,
+      },
+      "remote secret provider write failed and reserved secret rollback failed",
+    );
+    throw new HttpError(500, "Secret create failed and Paperclip could not roll back the local secret reservation.", {
+      code: "secret_create_rollback_failed",
+      provider: input.provider,
+      operation: input.operation,
+      providerConfigId,
+      providerError: {
+        status: providerError.status,
+        message: providerError.message,
+        details: providerError.details ?? null,
+      },
+    });
+  }
+  throw providerError;
+}
+
+function providerConfigIdentifier(input: {
+  providerConfigId?: string | null;
+  providerConfig: SecretProviderVaultRuntimeConfig | null;
+}) {
+  return input.providerConfig?.id ?? input.providerConfigId ?? "deployment-default";
+}
+
+async function deleteLocalSecretCreateReservationOrThrow(input: {
+  db: Pick<Db, "delete">;
+  secretId: string;
+  companyId: string;
+  provider: SecretProvider;
+  providerConfigId?: string | null;
+  providerConfig: SecretProviderVaultRuntimeConfig | null;
+  operation: string;
+}) {
+  try {
+    await input.db.delete(companySecretVersions).where(eq(companySecretVersions.secretId, input.secretId));
+    await input.db.delete(companySecrets).where(eq(companySecrets.id, input.secretId));
+  } catch (rollbackError) {
+    const providerConfigId = providerConfigIdentifier(input);
+    logger.warn(
+      {
+        err: rollbackError,
+        companyId: input.companyId,
+        provider: input.provider,
+        providerConfigId,
+        operation: input.operation,
+      },
+      "secret create failed and local reserved secret rollback failed",
+    );
+    throw new HttpError(500, "Secret create failed and Paperclip could not roll back the local secret reservation.", {
+      code: "secret_create_rollback_failed",
+      provider: input.provider,
+      operation: input.operation,
+      providerConfigId,
+    });
+  }
+}
+
+function throwProviderCleanupFailedAfterCreateRollback(input: {
+  companyId: string;
+  provider: SecretProvider;
+  providerConfigId?: string | null;
+  providerConfig: SecretProviderVaultRuntimeConfig | null;
+  operation: string;
+}): never {
+  const providerConfigId = providerConfigIdentifier(input);
+  throw new HttpError(500, "Secret create failed and Paperclip could not clean up the remote provider secret.", {
+    code: "secret_create_provider_cleanup_failed",
+    provider: input.provider,
+    operation: input.operation,
+    providerConfigId,
+    localCleanupHandle: true,
+  });
+}
+
 function safeRemoteProviderErrorDetails(
   error: { code: string } | null,
   context: {
@@ -144,7 +259,32 @@ function safeRemoteProviderErrorDetails(
     context.provider !== "aws_secrets_manager" ||
     context.operation !== "secret_provider_config.discovery.preview"
   ) {
-    return { code: error?.code ?? "provider_error" };
+    if (context.provider !== "aws_secrets_manager") {
+      return { code: error?.code ?? "provider_error" };
+    }
+    const details: Record<string, unknown> = {
+      code: error?.code ?? "provider_error",
+      provider: context.provider,
+      operation: context.operation,
+      providerConfigId: context.providerConfigId,
+    };
+    const region = safeString(context.providerConfig?.region);
+    if (region) details.region = region;
+    details.credentialPath = "Paperclip server runtime/provider credential path";
+    if (error?.code === "access_denied") {
+      if (context.operation === "secret.create") {
+        details.requiredCapability = "secretsmanager:CreateSecret";
+        details.actionableMessage =
+          "AWS managed secret creation needs secretsmanager:CreateSecret in the selected region for this provider vault. If the vault config uses a KMS key, the runtime credentials also need KMS write permissions for that key.";
+        details.safeAlternative =
+          "If the secret already exists in AWS, link it as an external reference instead of creating a Paperclip-managed value.";
+      } else if (context.operation === "secret.rotate") {
+        details.requiredCapability = "secretsmanager:PutSecretValue";
+        details.actionableMessage =
+          "AWS managed secret rotation needs secretsmanager:PutSecretValue for the selected provider vault and managed secret path.";
+      }
+    }
+    return details;
   }
   const details: Record<string, unknown> = {
     code: error?.code ?? "provider_error",
@@ -239,7 +379,13 @@ async function cleanupPreparedProviderWrite(input: {
 
 type CanonicalEnvBinding =
   | { type: "plain"; value: string }
-  | { type: "secret_ref"; secretId: string; version: number | "latest" }
+  | {
+      type: "secret_ref";
+      secretId: string;
+      version: number | "latest";
+      projectionClass: SecretProjectionClass;
+      projectionAllowlistKey: string | null;
+    }
   | {
       type: "user_secret_ref";
       key: string;
@@ -248,8 +394,10 @@ type CanonicalEnvBinding =
       allowMissingOverride: boolean;
     };
 
+type SecretAccessConsumerType = SecretBindingTargetType | "plugin_worker";
+
 type SecretConsumerContext = {
-  consumerType: SecretBindingTargetType;
+  consumerType: SecretAccessConsumerType;
   consumerId: string;
   configPath?: string | null;
   responsibleUserId?: string | null;
@@ -262,10 +410,19 @@ type SecretConsumerContext = {
   allowedBindingIds?: string[] | null;
 };
 
+type SecretBindingContext = Omit<SecretConsumerContext, "consumerType"> & {
+  consumerType: SecretBindingTargetType;
+};
+
 type SecretResolutionOptions = {
-  bindingContext?: SecretConsumerContext;
+  bindingContext?: SecretBindingContext;
   accessContext?: SecretConsumerContext;
   allowUserSecretScope?: boolean;
+};
+
+type ResolveAdapterConfigForRuntimeOptions = {
+  adapterType?: string | null;
+  skipUserSecrets?: boolean;
 };
 
 export type RuntimeSecretManifestEntry = {
@@ -295,6 +452,10 @@ export type MissingRuntimeBinding = {
   responsibleUserId?: string | null;
   errorCode?: SecretResolutionErrorCode;
 };
+
+function missingRuntimeConsumerType(consumerType: SecretAccessConsumerType): SecretBindingTargetType {
+  return consumerType === "plugin_worker" ? "plugin" : consumerType;
+}
 
 type RuntimeSecretResolution = {
   value: string;
@@ -359,7 +520,39 @@ function canonicalizeBinding(binding: EnvBinding): CanonicalEnvBinding {
     type: "secret_ref",
     secretId: binding.secretId,
     version: binding.version ?? "latest",
+    projectionClass: binding.projectionClass ?? "unclassified",
+    projectionAllowlistKey: binding.projectionAllowlistKey ?? null,
   };
+}
+
+function assertClass3StaticLeaseAllowed(input: {
+  targetType: SecretBindingTargetType;
+  configPath: string;
+  projectionClass?: string | null;
+  projectionAllowlistKey?: string | null;
+}) {
+  const projectionClass = input.projectionClass ?? "unclassified";
+  if (projectionClass !== "class_3_static_lease") return;
+  if (!input.projectionAllowlistKey?.trim()) {
+    throw unprocessable("Class-3 static lease bindings require an allowlist key", {
+      code: "class_3_static_lease_allowlist_required",
+      targetType: input.targetType,
+      configPath: input.configPath,
+    });
+  }
+  const allowed = CLASS3_STATIC_LEASE_ALLOWLIST.some((entry) =>
+    entry.key === input.projectionAllowlistKey
+    && entry.targetType === input.targetType
+    && entry.configPath === input.configPath
+  );
+  if (!allowed) {
+    throw unprocessable("Class-3 static lease binding is outside the approved allowlist", {
+      code: "class_3_static_lease_not_allowed",
+      allowlistKey: input.projectionAllowlistKey,
+      targetType: input.targetType,
+      configPath: input.configPath,
+    });
+  }
 }
 
 function defaultProviderConfigStatus(provider: SecretProvider): SecretProviderConfigStatus {
@@ -413,7 +606,7 @@ function missingUserSecretDefinitionRuntimeBinding(
   errorCode: "user_secret_definition_missing" | "user_secret_definition_inactive",
 ): MissingRuntimeBinding {
   return {
-    consumerType: context.consumerType,
+    consumerType: missingRuntimeConsumerType(context.consumerType),
     consumerId: context.consumerId,
     configPath: entry.configPath,
     envKey: entry.key,
@@ -594,7 +787,7 @@ export function secretService(db: Db) {
   async function assertBindingContext(
     companyId: string,
     secretId: string,
-    context: SecretConsumerContext | undefined,
+    context: SecretBindingContext | undefined,
   ) {
     if (!context) return null;
     if (!context.configPath) {
@@ -622,6 +815,12 @@ export function secretService(db: Db) {
         { code: "binding_not_allowed" },
       );
     }
+    assertClass3StaticLeaseAllowed({
+      targetType: binding.targetType as SecretBindingTargetType,
+      configPath: binding.configPath,
+      projectionClass: binding.projectionClass,
+      projectionAllowlistKey: binding.projectionAllowlistKey,
+    });
     return binding;
   }
 
@@ -910,16 +1109,22 @@ export function secretService(db: Db) {
     }
   }
 
+  function isSecretResolutionOptions(
+    value: SecretBindingContext | SecretResolutionOptions | undefined,
+  ): value is SecretResolutionOptions {
+    return Boolean(value && ("bindingContext" in value || "accessContext" in value));
+  }
+
   async function resolveSecretValue(
     companyId: string,
     secretId: string,
     version: number | "latest",
-    context?: SecretConsumerContext,
+    contextOrOptions?: SecretBindingContext | SecretResolutionOptions,
   ): Promise<string> {
-    return (await resolveSecretValueInternal(companyId, secretId, version, {
-      bindingContext: context,
-      accessContext: context,
-    })).value;
+    const options = isSecretResolutionOptions(contextOrOptions)
+      ? contextOrOptions
+      : { bindingContext: contextOrOptions, accessContext: contextOrOptions };
+    return (await resolveSecretValueInternal(companyId, secretId, version, options)).value;
   }
 
   async function resolveSecretValueForEphemeralAccess(
@@ -969,6 +1174,31 @@ export function secretService(db: Db) {
     })).value;
   }
 
+  async function resolveSecretVersion(
+    companyId: string,
+    secretId: string,
+    version: number | "latest",
+    context?: SecretBindingContext,
+  ): Promise<number> {
+    const secret = await getById(secretId);
+    if (!secret) throw notFound("Secret not found");
+    if (secret.companyId !== companyId) throw unprocessable("Secret must belong to same company");
+    const resolvedVersion = version === "latest" ? secret.latestVersion : version;
+    if (secret.status === "deleted") {
+      throw new HttpError(404, "Secret not found", { code: "secret_deleted" });
+    }
+    if (secret.status !== "active") {
+      throw unprocessable("Secret is not active", { code: "secret_inactive" });
+    }
+    await assertBindingContext(companyId, secret.id, context);
+    const versionRow = await getSecretVersion(secret.id, resolvedVersion);
+    if (!versionRow) throw new HttpError(404, "Secret version not found", { code: "version_missing" });
+    if (versionRow.status === "disabled" || versionRow.status === "destroyed" || versionRow.revokedAt) {
+      throw unprocessable("Secret version is not active", { code: "version_inactive" });
+    }
+    return resolvedVersion;
+  }
+
   async function normalizeEnvConfig(
     companyId: string,
     envValue: unknown,
@@ -1011,6 +1241,8 @@ export function secretService(db: Db) {
         type: "secret_ref",
         secretId: binding.secretId,
         version: binding.version,
+        projectionClass: binding.projectionClass,
+        projectionAllowlistKey: binding.projectionAllowlistKey,
       };
     }
     return normalized;
@@ -1083,6 +1315,8 @@ export function secretService(db: Db) {
         type: "secret_ref",
         secretId: binding.secretId,
         version: binding.version,
+        projectionClass: binding.projectionClass,
+        projectionAllowlistKey: binding.projectionAllowlistKey,
       };
     }
     if (binding.type === "user_secret_ref") {
@@ -1591,8 +1825,15 @@ export function secretService(db: Db) {
               context: providerWriteContext,
             });
     } catch (error) {
-      await db.delete(companySecrets).where(eq(companySecrets.id, reservedSecret.id)).catch(() => undefined);
-      throw error;
+      throw await throwProviderWriteOrReservedRowRollbackError({
+        error,
+        rollbackReservedRow: () => db.delete(companySecrets).where(eq(companySecrets.id, reservedSecret.id)),
+        companyId,
+        provider: provider.id,
+        providerConfigId,
+        providerConfig,
+        operation: "secret.create",
+      });
     }
 
     try {
@@ -1625,17 +1866,33 @@ export function secretService(db: Db) {
       });
     } catch (error) {
       if (managedMode === "paperclip_managed") {
-        await cleanupPreparedProviderWrite({
+        const cleaned = await cleanupPreparedProviderWrite({
           provider,
           prepared,
           providerConfig,
           context: providerWriteContext,
           mode: "delete",
           operation: "user_secret_value.create_rollback",
-        }).catch(() => false);
+        });
+        if (!cleaned) {
+          throwProviderCleanupFailedAfterCreateRollback({
+            companyId,
+            provider: provider.id,
+            providerConfigId,
+            providerConfig,
+            operation: "user_secret_value.create_rollback",
+          });
+        }
       }
-      await db.delete(companySecretVersions).where(eq(companySecretVersions.secretId, reservedSecret.id)).catch(() => undefined);
-      await db.delete(companySecrets).where(eq(companySecrets.id, reservedSecret.id)).catch(() => undefined);
+      await deleteLocalSecretCreateReservationOrThrow({
+        db,
+        secretId: reservedSecret.id,
+        companyId,
+        provider: provider.id,
+        providerConfigId,
+        providerConfig,
+        operation: "user_secret_value.create_rollback",
+      });
       throw error;
     }
   }
@@ -2762,6 +3019,7 @@ export function secretService(db: Db) {
     getById,
     getByName,
     resolveSecretValue,
+    resolveSecretVersion,
     resolveSecretValueForEphemeralAccess,
 
     create: async (
@@ -2855,8 +3113,15 @@ export function secretService(db: Db) {
                 context: providerWriteContext,
               });
       } catch (error) {
-        await db.delete(companySecrets).where(eq(companySecrets.id, reservedSecret.id)).catch(() => undefined);
-        throw error;
+        throw await throwProviderWriteOrReservedRowRollbackError({
+          error,
+          rollbackReservedRow: () => db.delete(companySecrets).where(eq(companySecrets.id, reservedSecret.id)),
+          companyId,
+          provider: provider.id,
+          providerConfigId: input.providerConfigId ?? null,
+          providerConfig,
+          operation: "secret.create",
+        });
       }
 
       try {
@@ -2889,14 +3154,25 @@ export function secretService(db: Db) {
             mode: "delete",
             operation: "create.prepare_rollback",
           });
-          if (cleaned) {
-            await db.delete(companySecretVersions).where(eq(companySecretVersions.secretId, reservedSecret.id)).catch(() => undefined);
-            await db.delete(companySecrets).where(eq(companySecrets.id, reservedSecret.id)).catch(() => undefined);
+          if (!cleaned) {
+            throwProviderCleanupFailedAfterCreateRollback({
+              companyId,
+              provider: provider.id,
+              providerConfigId: input.providerConfigId ?? null,
+              providerConfig,
+              operation: "create.prepare_rollback",
+            });
           }
-        } else {
-          await db.delete(companySecretVersions).where(eq(companySecretVersions.secretId, reservedSecret.id)).catch(() => undefined);
-          await db.delete(companySecrets).where(eq(companySecrets.id, reservedSecret.id)).catch(() => undefined);
         }
+        await deleteLocalSecretCreateReservationOrThrow({
+          db,
+          secretId: reservedSecret.id,
+          companyId,
+          provider: provider.id,
+          providerConfigId: input.providerConfigId ?? null,
+          providerConfig,
+          operation: "create.prepare_rollback",
+        });
         throw error;
       }
 
@@ -2936,14 +3212,25 @@ export function secretService(db: Db) {
             mode: "delete",
             operation: "create.rollback",
           });
-          if (cleaned) {
-            await db.delete(companySecretVersions).where(eq(companySecretVersions.secretId, reservedSecret.id)).catch(() => undefined);
-            await db.delete(companySecrets).where(eq(companySecrets.id, reservedSecret.id)).catch(() => undefined);
+          if (!cleaned) {
+            throwProviderCleanupFailedAfterCreateRollback({
+              companyId,
+              provider: provider.id,
+              providerConfigId: input.providerConfigId ?? null,
+              providerConfig,
+              operation: "create.rollback",
+            });
           }
-        } else {
-          await db.delete(companySecretVersions).where(eq(companySecretVersions.secretId, reservedSecret.id)).catch(() => undefined);
-          await db.delete(companySecrets).where(eq(companySecrets.id, reservedSecret.id)).catch(() => undefined);
         }
+        await deleteLocalSecretCreateReservationOrThrow({
+          db,
+          secretId: reservedSecret.id,
+          companyId,
+          provider: provider.id,
+          providerConfigId: input.providerConfigId ?? null,
+          providerConfig,
+          operation: "create.rollback",
+        });
         throw error;
       }
     },
@@ -2986,20 +3273,31 @@ export function secretService(db: Db) {
         secretName: secret.name,
         version: nextVersion,
       };
-      const prepared =
-        secret.managedMode === "external_reference"
-          ? await provider.linkExternalSecret({
-              externalRef: input.externalRef ?? secret.externalRef ?? "",
-              providerVersionRef: input.providerVersionRef ?? null,
-              providerConfig,
-              context: providerWriteContext,
-            })
-          : await provider.createVersion({
-              value: input.value ?? "",
-              externalRef: secret.externalRef ?? null,
-              providerConfig,
-              context: providerWriteContext,
-            });
+      let prepared: PreparedSecretVersion;
+      try {
+        prepared =
+          secret.managedMode === "external_reference"
+            ? await provider.linkExternalSecret({
+                externalRef: input.externalRef ?? secret.externalRef ?? "",
+                providerVersionRef: input.providerVersionRef ?? null,
+                providerConfig,
+                context: providerWriteContext,
+              })
+            : await provider.createVersion({
+                value: input.value ?? "",
+                externalRef: secret.externalRef ?? null,
+                providerConfig,
+                context: providerWriteContext,
+              });
+      } catch (error) {
+        throw remoteProviderWriteHttpError(error, {
+          companyId: secret.companyId,
+          provider: provider.id,
+          providerConfigId,
+          providerConfig,
+          operation: "secret.rotate",
+        });
+      }
 
       try {
         await db.insert(companySecretVersions).values({
@@ -3196,8 +3494,16 @@ export function secretService(db: Db) {
       versionSelector?: SecretVersionSelector;
       required?: boolean;
       label?: string | null;
+      projectionClass?: SecretProjectionClass;
+      projectionAllowlistKey?: string | null;
     }) => {
       await assertSecretInCompany(input.companyId, input.secretId);
+      assertClass3StaticLeaseAllowed({
+        targetType: input.targetType,
+        configPath: input.configPath,
+        projectionClass: input.projectionClass,
+        projectionAllowlistKey: input.projectionAllowlistKey,
+      });
       const existing = await db
         .select()
         .from(companySecretBindings)
@@ -3222,6 +3528,8 @@ export function secretService(db: Db) {
           versionSelector: String(input.versionSelector ?? "latest"),
           required: input.required ?? true,
           label: input.label ?? null,
+          projectionClass: input.projectionClass ?? "unclassified",
+          projectionAllowlistKey: input.projectionAllowlistKey ?? null,
         })
         .returning()
         .then((rows) => rows[0]);
@@ -3236,6 +3544,8 @@ export function secretService(db: Db) {
         versionSelector?: SecretVersionSelector;
         required?: boolean;
         label?: string | null;
+        projectionClass?: SecretProjectionClass;
+        projectionAllowlistKey?: string | null;
       }>,
       options?: { replaceAll?: boolean },
     ) => {
@@ -3245,15 +3555,27 @@ export function secretService(db: Db) {
         versionSelector: SecretVersionSelector;
         required: boolean;
         label: string | null;
+        projectionClass: SecretProjectionClass;
+        projectionAllowlistKey: string | null;
       }> = [];
       for (const ref of refs) {
         await assertSecretInCompany(companyId, ref.secretId);
+        const projectionClass = ref.projectionClass ?? "unclassified";
+        const projectionAllowlistKey = ref.projectionAllowlistKey ?? null;
+        assertClass3StaticLeaseAllowed({
+          targetType: target.targetType,
+          configPath: ref.configPath,
+          projectionClass,
+          projectionAllowlistKey,
+        });
         normalizedRefs.push({
           secretId: ref.secretId,
           configPath: ref.configPath,
           versionSelector: ref.versionSelector ?? "latest",
           required: ref.required ?? true,
           label: ref.label ?? null,
+          projectionClass,
+          projectionAllowlistKey,
         });
       }
 
@@ -3308,6 +3630,8 @@ export function secretService(db: Db) {
             versionSelector: String(ref.versionSelector),
             required: ref.required,
             label: ref.label,
+            projectionClass: ref.projectionClass,
+            projectionAllowlistKey: ref.projectionAllowlistKey,
           })),
         );
       });
@@ -3339,6 +3663,8 @@ export function secretService(db: Db) {
         secretId: string;
         configPath: string;
         versionSelector: SecretVersionSelector;
+        projectionClass: SecretProjectionClass;
+        projectionAllowlistKey: string | null;
       }> = [];
       const userRefs: Array<{
         definitionKey: string;
@@ -3368,10 +3694,19 @@ export function secretService(db: Db) {
         }
         if (binding.type !== "secret_ref") continue;
         await assertSecretInCompany(companyId, binding.secretId, bindingDb);
+        const configPath = `${pathPrefix}.${key}`;
+        assertClass3StaticLeaseAllowed({
+          targetType: target.targetType,
+          configPath,
+          projectionClass: binding.projectionClass,
+          projectionAllowlistKey: binding.projectionAllowlistKey,
+        });
         refs.push({
           secretId: binding.secretId,
-          configPath: `${pathPrefix}.${key}`,
+          configPath,
           versionSelector: binding.version,
+          projectionClass: binding.projectionClass,
+          projectionAllowlistKey: binding.projectionAllowlistKey,
         });
       }
 
@@ -3396,6 +3731,8 @@ export function secretService(db: Db) {
             configPath: ref.configPath,
             versionSelector: String(ref.versionSelector),
             required: true,
+            projectionClass: ref.projectionClass,
+            projectionAllowlistKey: ref.projectionAllowlistKey,
           })),
           );
       };
@@ -3478,7 +3815,7 @@ export function secretService(db: Db) {
     resolveEnvBindings: async (
       companyId: string,
       envValue: unknown,
-      context?: Omit<SecretConsumerContext, "configPath">,
+      context?: Omit<SecretBindingContext, "configPath">,
     ): Promise<{ env: Record<string, string>; secretKeys: Set<string>; manifest: RuntimeSecretManifestEntry[] }> => {
       const record = asRecord(envValue);
       if (!record) return { env: {} as Record<string, string>, secretKeys: new Set<string>(), manifest: [] };
@@ -3546,7 +3883,7 @@ export function secretService(db: Db) {
     collectMissingRuntimeBindings: async (
       companyId: string,
       envValue: unknown,
-      context: Omit<SecretConsumerContext, "configPath">,
+      context: Omit<SecretBindingContext, "configPath">,
     ): Promise<MissingRuntimeBinding[]> => {
       const record = asRecord(envValue);
       if (!record) return [];
@@ -3706,7 +4043,7 @@ export function secretService(db: Db) {
       companyId: string,
       adapterConfig: Record<string, unknown>,
       adapterType: string | null | undefined,
-      context: Omit<SecretConsumerContext, "configPath">,
+      context: Omit<SecretBindingContext, "configPath">,
     ): Promise<MissingRuntimeBinding[]> => {
       const secretFieldKeys = await listAdapterSchemaSecretFieldKeys(adapterType);
       const secretRefs = secretFieldKeys.flatMap((key) => {
@@ -3862,8 +4199,8 @@ export function secretService(db: Db) {
     resolveAdapterConfigForRuntime: async (
       companyId: string,
       adapterConfig: Record<string, unknown>,
-      context?: Omit<SecretConsumerContext, "configPath">,
-      opts?: { adapterType?: string | null },
+      context?: Omit<SecretBindingContext, "configPath">,
+      opts?: ResolveAdapterConfigForRuntimeOptions,
     ): Promise<{ config: Record<string, unknown>; secretKeys: Set<string>; manifest: RuntimeSecretManifestEntry[] }> => {
       const resolved = { ...adapterConfig };
       const secretKeys = new Set<string>();
@@ -3901,6 +4238,7 @@ export function secretService(db: Db) {
               manifest.push(secretResolution.manifestEntry);
               secretKeys.add(key);
             } else {
+              if (opts?.skipUserSecrets) continue;
               const secretResolution = await secretService(db).resolveUserSecretValue(
                 companyId,
                 {
@@ -3934,6 +4272,10 @@ export function secretService(db: Db) {
         const binding = canonicalizeBinding(parsed.data as EnvBinding);
         if (binding.type === "plain") continue;
         if (binding.type === "user_secret_ref") {
+          if (opts?.skipUserSecrets) {
+            delete resolved[key];
+            continue;
+          }
           const secretResolution = await secretService(db).resolveUserSecretValue(
             companyId,
             {

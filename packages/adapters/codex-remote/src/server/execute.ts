@@ -757,6 +757,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     executionTargetIsRemote,
     executionCwd: effectiveExecutionCwd,
   });
+  // Remote Codex may need an operator-configured URL that is reachable from
+  // the SSH host or sandbox rather than the Paperclip server's local runtime
+  // URL. Upstream now protects managed PAPERCLIP_* variables during the
+  // generic env merge, so preserve this adapter's explicit reachability
+  // override without allowing config to replace agent/run identity fields.
+  if (typeof envConfig.PAPERCLIP_API_URL === "string" && envConfig.PAPERCLIP_API_URL.trim()) {
+    env.PAPERCLIP_API_URL = envConfig.PAPERCLIP_API_URL.trim();
+  }
   if (runtimeServiceIntents.length > 0) {
     env.PAPERCLIP_RUNTIME_SERVICE_INTENTS_JSON = JSON.stringify(runtimeServiceIntents);
   }
