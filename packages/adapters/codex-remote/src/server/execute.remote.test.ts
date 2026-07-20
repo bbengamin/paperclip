@@ -3,6 +3,13 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+// Must be set before ./execute.js is imported: the silent-window heartbeat
+// interval is read at module load. 100ms keeps the heartbeat test fast on
+// real timers (fake timers starve execute()'s real fs I/O during setup).
+vi.hoisted(() => {
+  process.env.PAPERCLIP_CODEX_SILENT_HEARTBEAT_MS = "100";
+});
+
 const {
   runChildProcess,
   ensureCommandResolvable,
@@ -99,7 +106,47 @@ vi.mock("./paperclip-bridge.js", () => ({
   startCodexRemotePaperclipBridge,
 }));
 
-import { execute, isRemoteTransportDropError } from "./execute.js";
+import { execute, isRemoteTransportDropError, deriveCodexRuntimeStatusUpdate } from "./execute.js";
+import { parseCodexStdoutLine } from "../ui/parse-stdout.js";
+
+describe("deriveCodexRuntimeStatusUpdate", () => {
+  const parse = (line: string) => parseCodexStdoutLine(line, "2026-07-06T00:00:00.000Z");
+
+  it("labels a command_execution tool call with the command", () => {
+    const entries = parse(
+      JSON.stringify({ type: "item.started", item: { id: "item_1", type: "command_execution", command: "npm ci" } }),
+    );
+    expect(deriveCodexRuntimeStatusUpdate(entries)).toEqual({
+      message: "Running npm ci",
+      currentToolName: "command_execution",
+      lastAssistantSnippet: null,
+    });
+  });
+
+  it("labels an assistant message with its text snippet", () => {
+    const entries = parse(
+      JSON.stringify({ type: "item.completed", item: { id: "item_0", type: "agent_message", text: "Cloning the repo now." } }),
+    );
+    expect(deriveCodexRuntimeStatusUpdate(entries)).toEqual({
+      message: "Cloning the repo now.",
+      currentToolName: null,
+      lastAssistantSnippet: "Cloning the repo now.",
+    });
+  });
+
+  it("returns null for non-meaningful events", () => {
+    expect(deriveCodexRuntimeStatusUpdate(parse(JSON.stringify({ type: "turn.started" })))).toBeNull();
+    expect(deriveCodexRuntimeStatusUpdate([])).toBeNull();
+  });
+
+  it("keeps the latest meaningful entry in a batch", () => {
+    const entries = [
+      ...parse(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "first" } })),
+      ...parse(JSON.stringify({ type: "item.started", item: { id: "x", type: "command_execution", command: "ls -la" } })),
+    ];
+    expect(deriveCodexRuntimeStatusUpdate(entries)?.message).toBe("Running ls -la");
+  });
+});
 
 describe("codex remote execution", () => {
   const cleanupDirs: string[] = [];
@@ -548,6 +595,93 @@ describe("codex remote execution", () => {
     );
   });
 
+  it("forwards the sandbox bridge runLogTail into the Codex exec for live streaming", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-runlogtail-"));
+    cleanupDirs.push(rootDir);
+    const workspaceDir = path.join(rootDir, "workspace");
+    const codexHomeDir = path.join(rootDir, "codex-home");
+    await mkdir(workspaceDir, { recursive: true });
+    await mkdir(codexHomeDir, { recursive: true });
+    await writeFile(path.join(codexHomeDir, "config.toml"), 'model = "gpt-5"\n', "utf8");
+    await writeFile(path.join(codexHomeDir, "auth.json"), "{}", "utf8");
+
+    prepareAdapterExecutionTargetRuntimeMock.mockResolvedValueOnce({
+      target: {
+        kind: "remote",
+        transport: "sandbox",
+        providerKey: "cloudflare",
+        leaseId: "lease-1",
+        remoteCwd: "/workspace/paperclip",
+      },
+      workspaceRemoteDir: "/workspace/paperclip",
+      runtimeRootDir: "/workspace/paperclip/.paperclip-runtime/codex",
+      assetDirs: { home: "/workspace/paperclip/.paperclip-runtime/codex/home" },
+      restoreWorkspace: async () => {},
+    });
+
+    // The forked codex_remote bridge now creates a run-log tail factory; execute
+    // must forward it so runAdapterExecutionTargetProcess streams incrementally
+    // instead of waiting for the batched provider result.
+    const runLogTailSentinel = { create: vi.fn() };
+    startCodexRemotePaperclipBridge.mockResolvedValueOnce({
+      env: {
+        PAPERCLIP_API_URL: "http://127.0.0.1:4310",
+        PAPERCLIP_API_KEY: "bridge-token",
+        PAPERCLIP_API_BRIDGE_MODE: "queue_v1",
+      },
+      runLogTail: runLogTailSentinel,
+      stop: async () => {},
+    } as never);
+
+    // Capture the exec options without invoking the real (sentinel-incompatible) runner path.
+    runAdapterExecutionTargetProcessMock.mockResolvedValueOnce({
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      stdout: "",
+      stderr: "",
+      pid: null,
+      startedAt: new Date().toISOString(),
+    });
+
+    await execute({
+      runId: "run-runlogtail",
+      agent: {
+        id: "agent-1",
+        companyId: "company-1",
+        name: "CodexCoder",
+        adapterType: "codex_remote",
+        adapterConfig: {},
+      },
+      runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+      config: { command: "codex", env: { CODEX_HOME: codexHomeDir } },
+      context: { paperclipWorkspace: { cwd: workspaceDir, source: "project_primary" } },
+      executionTarget: {
+        kind: "remote",
+        transport: "sandbox",
+        providerKey: "cloudflare",
+        leaseId: "lease-1",
+        remoteCwd: "/workspace/paperclip",
+        runner: {
+          execute: vi.fn(async () => ({
+            exitCode: 0,
+            signal: null,
+            timedOut: false,
+            stdout: "",
+            stderr: "",
+            pid: null,
+            startedAt: new Date().toISOString(),
+          })),
+        },
+      },
+      onLog: async () => {},
+    });
+
+    expect(runAdapterExecutionTargetProcessMock).toHaveBeenCalled();
+    const call = runAdapterExecutionTargetProcessMock.mock.calls.at(-1);
+    expect(call?.[4]?.runLogTail).toBe(runLogTailSentinel);
+  });
+
   it("classifies a mid-run remote transport drop as a transient upstream error instead of failing", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-transport-drop-"));
     cleanupDirs.push(rootDir);
@@ -614,6 +748,195 @@ describe("codex remote execution", () => {
     expect(result.errorMessage).toContain("Network connection lost");
     // The workspace-restore in the finally block still runs so nothing leaks.
     expect(restoreWorkspaceFromSshExecution).toHaveBeenCalledTimes(1);
+  });
+
+  it("reconnects and resumes the Codex session in-run when a sandbox transport drops mid-run", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-inrun-reconnect-"));
+    cleanupDirs.push(rootDir);
+    const workspaceDir = path.join(rootDir, "workspace");
+    const codexHomeDir = path.join(rootDir, "codex-home");
+    await mkdir(workspaceDir, { recursive: true });
+    await mkdir(codexHomeDir, { recursive: true });
+    await writeFile(path.join(codexHomeDir, "config.toml"), 'model = "gpt-5"\n', "utf8");
+    await writeFile(path.join(codexHomeDir, "auth.json"), "{}", "utf8");
+
+    prepareAdapterExecutionTargetRuntimeMock.mockResolvedValueOnce({
+      target: { kind: "remote", transport: "sandbox", providerKey: "cloudflare", leaseId: "lease-1", remoteCwd: "/workspace/paperclip" },
+      workspaceRemoteDir: "/workspace/paperclip",
+      runtimeRootDir: "/workspace/paperclip/.paperclip-runtime/codex",
+      assetDirs: { home: "/workspace/paperclip/.paperclip-runtime/codex/home" },
+      restoreWorkspace: async () => {},
+    });
+    startCodexRemotePaperclipBridge.mockResolvedValueOnce({
+      env: { PAPERCLIP_API_URL: "http://127.0.0.1:4310", PAPERCLIP_API_KEY: "bridge-token", PAPERCLIP_API_BRIDGE_MODE: "queue_v1" },
+      runLogTail: { create: vi.fn() },
+      stop: async () => {},
+    } as never);
+
+    const transportError = Object.assign(
+      new Error("Cloudflare sandbox bridge streaming response ended without a completion event."),
+      { name: "JsonRpcCallError" },
+    );
+    // Attempt 1: emit thread.started (so the live session id is captured), then drop.
+    runAdapterExecutionTargetProcessMock.mockImplementationOnce(async (
+      _runId: unknown,
+      _target: unknown,
+      _command: unknown,
+      _args: unknown,
+      opts: { onLog?: (stream: string, chunk: string) => Promise<void> | void },
+    ) => {
+      await opts?.onLog?.("stdout", '{"type":"thread.started","thread_id":"thr-live-1"}\n');
+      throw transportError;
+    });
+    // Attempt 2 (in-run resume): completes cleanly.
+    runAdapterExecutionTargetProcessMock.mockResolvedValueOnce({
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      stdout:
+        '{"type":"thread.started","thread_id":"thr-live-1"}\n{"type":"item.completed","item":{"type":"agent_message","text":"done"}}\n{"type":"turn.completed","usage":{}}\n',
+      stderr: "",
+      pid: null,
+      startedAt: new Date().toISOString(),
+    });
+
+    const result = await execute({
+      runId: "run-inrun-reconnect",
+      agent: { id: "agent-1", companyId: "company-1", name: "CodexCoder", adapterType: "codex_remote", adapterConfig: {} },
+      runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+      config: { command: "codex", env: { CODEX_HOME: codexHomeDir } },
+      context: { paperclipWorkspace: { cwd: workspaceDir, source: "project_primary" } },
+      executionTarget: {
+        kind: "remote",
+        transport: "sandbox",
+        providerKey: "cloudflare",
+        leaseId: "lease-1",
+        remoteCwd: "/workspace/paperclip",
+        runner: {
+          execute: vi.fn(async () => ({
+            exitCode: 0,
+            signal: null,
+            timedOut: false,
+            stdout: "",
+            stderr: "",
+            pid: null,
+            startedAt: new Date().toISOString(),
+          })),
+        },
+      },
+      onLog: async () => {},
+    });
+
+    // Two attempts (drop + resume); the run did NOT surface as failed.
+    expect(runAdapterExecutionTargetProcessMock).toHaveBeenCalledTimes(2);
+    expect(result.errorCode).not.toBe("codex_remote_transport_lost");
+    expect(result.errorFamily).toBeNull();
+    expect(result.exitCode).toBe(0);
+    // The second attempt resumed the live session captured from the first.
+    const secondArgs = runAdapterExecutionTargetProcessMock.mock.calls[1]?.[3] as string[];
+    expect(secondArgs).toContain("resume");
+    expect(secondArgs).toContain("thr-live-1");
+  });
+
+  it("logs a heartbeat while a remote Codex process stays silent", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-silent-heartbeat-"));
+    cleanupDirs.push(rootDir);
+    const workspaceDir = path.join(rootDir, "workspace");
+    const codexHomeDir = path.join(rootDir, "codex-home");
+    await mkdir(workspaceDir, { recursive: true });
+    await mkdir(codexHomeDir, { recursive: true });
+    await writeFile(path.join(codexHomeDir, "auth.json"), "{}", "utf8");
+
+    // Codex launches but produces no output (observed live: the sandbox
+    // control plane buffered ~5 minutes of stdout before delivering it).
+    let resolveProc!: (value: {
+      exitCode: number;
+      signal: null;
+      timedOut: boolean;
+      stdout: string;
+      stderr: string;
+      pid: number;
+      startedAt: string;
+    }) => void;
+    runChildProcess.mockImplementationOnce(
+      () => new Promise((resolve) => { resolveProc = resolve; }) as never,
+    );
+
+    const logs: string[] = [];
+    const resultPromise = execute({
+        runId: "run-silent-heartbeat",
+        agent: {
+          id: "agent-1",
+          companyId: "company-1",
+          name: "CodexCoder",
+          adapterType: "codex_remote",
+          adapterConfig: {},
+        },
+        runtime: {
+          sessionId: null,
+          sessionParams: null,
+          sessionDisplayId: null,
+          taskKey: null,
+        },
+        config: {
+          command: "codex",
+          env: {
+            CODEX_HOME: codexHomeDir,
+          },
+        },
+        context: {
+          paperclipWorkspace: {
+            cwd: workspaceDir,
+            source: "project_primary",
+          },
+        },
+        executionTransport: {
+          remoteExecution: {
+            host: "127.0.0.1",
+            port: 2222,
+            username: "fixture",
+            remoteWorkspacePath: "/remote/workspace",
+            remoteCwd: "/remote/workspace",
+            privateKey: "PRIVATE KEY",
+            knownHosts: "[127.0.0.1]:2222 ssh-ed25519 AAAA",
+            strictHostKeyChecking: true,
+          },
+        },
+      onLog: async (_stream, chunk) => {
+        logs.push(chunk);
+      },
+    });
+
+    // Wait (real timers, 100ms heartbeat interval via env override) until the
+    // launch happened and at least two heartbeats fired during the silence.
+    const waitFor = async (predicate: () => boolean, timeoutMs = 5_000) => {
+      const startedAt = Date.now();
+      while (!predicate()) {
+        if (Date.now() - startedAt > timeoutMs) throw new Error("timed out waiting for condition");
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    };
+    await waitFor(() => runChildProcess.mock.calls.length === 1);
+    await waitFor(() =>
+      logs.filter((line) => line.includes("still waiting for first Codex output")).length >= 2,
+    );
+
+    resolveProc({
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      stdout: "",
+      stderr: "",
+      pid: 123,
+      startedAt: new Date().toISOString(),
+    });
+    const result = await resultPromise;
+    expect(result.exitCode).toBe(0);
+
+    // Interval is cleared once the process settles: no further heartbeats.
+    const heartbeatCountAtExit = logs.filter((line) => line.includes("still waiting")).length;
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    expect(logs.filter((line) => line.includes("still waiting")).length).toBe(heartbeatCountAtExit);
   });
 
   it("does not misclassify a normal non-zero Codex exit as a transport drop", () => {

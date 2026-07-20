@@ -1,7 +1,8 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { inferOpenAiCompatibleBiller, type AdapterExecutionContext, type AdapterExecutionResult } from "@paperclipai/adapter-utils";
+import { inferOpenAiCompatibleBiller, type AdapterExecutionContext, type AdapterExecutionResult, type TranscriptEntry } from "@paperclipai/adapter-utils";
+import { parseCodexStdoutLine } from "../ui/parse-stdout.js";
 import {
   adapterExecutionTargetIsRemote,
   adapterExecutionTargetRemoteCwd,
@@ -51,7 +52,6 @@ import { buildCodexExecArgs } from "./codex-args.js";
 import { applyTailscaleProxyEnv, ensureSandboxTailscaleUp, readTailscaleAuthKey } from "./tailscale.js";
 import { stripNonPosixSandboxEnvKeys } from "./sandbox-env.js";
 import { startCodexRemotePaperclipBridge } from "./paperclip-bridge.js";
-import { SANDBOX_INSTALL_COMMAND } from "../index.js";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const SANDBOX_GLOBAL_CODEX_HOME = "/root/.codex";
@@ -80,6 +80,46 @@ function firstNonEmptyLine(text: string): string {
       .map((line) => line.trim())
       .find(Boolean) ?? ""
   );
+}
+
+// Safety cap so a pathological newline-less stdout stream can't grow the
+// runtime-status line buffer without bound. Normal Codex JSONL is newline
+// delimited, so the buffer only ever holds one partial line.
+const CODEX_STATUS_LINE_BUFFER_CAP_BYTES = 8 * 1024 * 1024;
+
+function truncateStatusText(text: string, max = 160): string {
+  const collapsed = text.replace(/\s+/g, " ").trim();
+  return collapsed.length > max ? `${collapsed.slice(0, max - 1)}…` : collapsed;
+}
+
+// Derive a human-readable runtime-status update from parsed Codex transcript
+// entries so the issue-thread status line advances past "Starting adapter in
+// sandbox" while the run streams (tool activity / assistant text), matching the
+// local adapters. Cosmetic — the run itself is unaffected. Returns the latest
+// meaningful update in the batch, or null if none.
+export function deriveCodexRuntimeStatusUpdate(
+  entries: TranscriptEntry[],
+): { message: string; currentToolName: string | null; lastAssistantSnippet: string | null } | null {
+  let update: { message: string; currentToolName: string | null; lastAssistantSnippet: string | null } | null = null;
+  for (const entry of entries) {
+    if (entry.kind === "tool_call") {
+      const name = (typeof entry.name === "string" && entry.name.trim()) || "tool";
+      const input = entry.input as Record<string, unknown> | undefined;
+      const command = input && typeof input.command === "string" ? input.command.trim() : "";
+      const message =
+        name === "command_execution" && command
+          ? `Running ${truncateStatusText(command, 120)}`
+          : `Using ${name}`;
+      update = { message, currentToolName: name, lastAssistantSnippet: null };
+    } else if (entry.kind === "assistant") {
+      const text = typeof entry.text === "string" ? entry.text : "";
+      if (text.trim()) {
+        const snippet = truncateStatusText(text);
+        update = { message: snippet, currentToolName: null, lastAssistantSnippet: snippet };
+      }
+    }
+  }
+  return update;
 }
 
 function describeCodexLaunchTarget(target: ReturnType<typeof readAdapterExecutionTarget> | undefined): string {
@@ -118,10 +158,40 @@ function hasNonEmptyEnvValue(env: Record<string, string>, key: string): boolean 
   return typeof raw === "string" && raw.trim().length > 0;
 }
 
+// While a remote Codex process produces no output, log a heartbeat line every
+// interval. Two jobs: (1) make upstream output-delivery stalls visible in run
+// logs (observed live: the Cloudflare container control plane buffered ~187KB
+// of Codex stdout for ~5 minutes before delivering it as one chunk), and
+// (2) keep the run row's updatedAt fresh through the platform's output-progress
+// flush so staleness-based reapers never mistake a silent-but-alive remote run
+// for a dead one. The env override exists for tests.
+const CODEX_SILENT_WINDOW_HEARTBEAT_MS = (() => {
+  const value = Number(process.env.PAPERCLIP_CODEX_SILENT_HEARTBEAT_MS);
+  return Number.isFinite(value) && value > 0 ? Math.trunc(value) : 60_000;
+})();
+
 // Delay before the platform is allowed to retry a run that died from a remote
 // transport drop. Short, because the warm sandbox is usually still alive and a
 // resume can continue almost immediately.
 const REMOTE_TRANSPORT_DROP_RETRY_DELAY_MS = 15_000;
+
+// In-run reconnect: when the exec transport drops mid-run, resume the Codex
+// session against the still-warm sandbox *within the same run* instead of
+// returning a failure (so the Paperclip run stays alive and never shows as
+// failed). Bounded so a genuinely broken run still fails and defers to
+// Paperclip's own retry/fail workflow.
+const MAX_INRUN_RECONNECT_ATTEMPTS = (() => {
+  const value = Number(process.env.PAPERCLIP_CODEX_REMOTE_INRUN_RECONNECTS);
+  return Number.isFinite(value) && value >= 0 ? Math.trunc(value) : 4;
+})();
+// Short pause between an in-run drop and the resume attempt.
+const INRUN_RECONNECT_DELAY_MS = (() => {
+  const value = Number(process.env.PAPERCLIP_CODEX_REMOTE_INRUN_RECONNECT_DELAY_MS);
+  return Number.isFinite(value) && value > 0 ? Math.trunc(value) : 3_000;
+})();
+// Don't start another in-run reconnect if less than this much of the run's
+// timeout budget remains — not worth resuming for a few seconds.
+const MIN_INRUN_RECONNECT_BUDGET_SEC = 60;
 
 // Signatures of a remote-execution *transport* failure — the sandbox link (SSH
 // channel, sandbox bridge SSE, or the plugin-worker RPC that carries the
@@ -644,7 +714,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           ...(skipRemoteWorkspaceSync
             ? { workspaceRemoteDir: effectiveExecutionCwd, syncWorkspace: false }
             : {}),
-          installCommand: SANDBOX_INSTALL_COMMAND,
+          // Codex is baked into the remote image (pinned via apps.env); do not
+          // reinstall it at runtime. detectCommand still lets the runtime verify
+          // the binary is present without triggering an install.
           detectCommand: command,
           assets: [
             {
@@ -999,7 +1071,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     heartbeatPromptChars: renderedPrompt.length,
   };
 
-  const runAttempt = async (resumeSessionId: string | null) => {
+  // The live Codex thread id, captured from the stream as soon as `thread.started`
+  // arrives. This is what lets an in-run reconnect resume the *current* session
+  // even on a fresh run (where no prior session id exists yet).
+  let liveSessionId: string | null = null;
+
+  const runAttempt = async (resumeSessionId: string | null, attemptTimeoutSec: number = timeoutSec) => {
     await logRemoteTiming(resumeSessionId ? `starting Codex resume ${resumeSessionId}` : "starting fresh Codex exec");
     const execArgs = buildCodexExecArgs(
       forceSaferInvocation ? { ...config, fastMode: false } : config,
@@ -1040,7 +1117,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         `args=${args.length}`,
         `cwd=${cwd}`,
         `effectiveCwd=${effectiveExecutionCwd}`,
-        `timeoutSec=${timeoutSec}`,
+        `timeoutSec=${attemptTimeoutSec}`,
         `graceSec=${graceSec}`,
         `promptChars=${prompt.length}`,
         `resume=${resumeSessionId ?? "none"}`,
@@ -1048,21 +1125,90 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       ].join(" "),
     );
     const processStartedAt = Date.now();
+    let lastOutputAt: number | null = null;
+    // Buffers partial stdout between chunks so we only parse whole Codex JSONL
+    // lines when deriving the live runtime-status label.
+    let runtimeStatusLineBuffer = "";
+    const silentWindowHeartbeat = executionTargetIsRemote
+      ? setInterval(() => {
+          const sinceOutputMs = Date.now() - (lastOutputAt ?? processStartedAt);
+          if (sinceOutputMs < CODEX_SILENT_WINDOW_HEARTBEAT_MS) return;
+          void logRemoteTiming(
+            lastOutputAt === null
+              ? `still waiting for first Codex output (${sinceOutputMs}ms since launch); Codex is likely running with output buffered upstream`
+              : `no Codex output for ${sinceOutputMs}ms; process still running`,
+          ).catch(() => undefined);
+        }, CODEX_SILENT_WINDOW_HEARTBEAT_MS)
+      : null;
     let proc: RunProcessResult;
     try {
       proc = await runAdapterExecutionTargetProcess(runId, runtimeExecutionTarget, command, args, {
         cwd,
         env,
         stdin: prompt,
-        timeoutSec,
+        timeoutSec: attemptTimeoutSec,
         graceSec,
         onSpawn,
+        // Surface live runtime/sandbox progress to the UI (sync status, etc.),
+        // matching the local sandbox adapters. Without this the issue thread
+        // shows no activity signal while a remote run is in flight.
+        onRuntimeProgress: ctx.onRuntimeProgress,
+        // Stream Codex's stdout/stderr incrementally from the sandbox instead of
+        // waiting for the batched provider result at process exit. When present,
+        // runAdapterExecutionTargetProcess wraps the command to tee output into
+        // tailable log files and streams them through onLog during the run.
+        runLogTail: paperclipBridge?.runLogTail,
         onLog: async (stream, chunk) => {
+          if (chunk.length > 0) {
+            lastOutputAt = Date.now();
+          }
+          // Capture the live Codex thread id the moment it appears so an in-run
+          // reconnect can resume this exact session (best-effort; never throws).
+          if (stream !== "stderr" && !liveSessionId && chunk.includes('"thread.started"')) {
+            try {
+              const captured = parseCodexJsonl(chunk).sessionId;
+              if (captured) {
+                liveSessionId = captured;
+                void logRemoteTiming(`captured live Codex session ${captured} (available for in-run reconnect)`).catch(() => undefined);
+              }
+            } catch {
+              // best-effort session capture
+            }
+          }
           if (!firstOutputLogged && chunk.length > 0) {
             firstOutputLogged = true;
             await logRemoteTiming(`first Codex ${stream} chunk received (${Buffer.byteLength(chunk, "utf8")} bytes)`);
           }
           if (stream !== "stderr") {
+            // Advance the issue-thread runtime-status label from live Codex
+            // output (tool activity / assistant text). Cosmetic and best-effort:
+            // never let a parse error interfere with forwarding the log itself.
+            if (ctx.onRuntimeProgress) {
+              try {
+                runtimeStatusLineBuffer += chunk;
+                if (runtimeStatusLineBuffer.length > CODEX_STATUS_LINE_BUFFER_CAP_BYTES) {
+                  const lastNewline = runtimeStatusLineBuffer.lastIndexOf("\n");
+                  runtimeStatusLineBuffer =
+                    lastNewline >= 0 ? runtimeStatusLineBuffer.slice(lastNewline + 1) : "";
+                }
+                const newlineIdx = runtimeStatusLineBuffer.lastIndexOf("\n");
+                if (newlineIdx >= 0) {
+                  const complete = runtimeStatusLineBuffer.slice(0, newlineIdx);
+                  runtimeStatusLineBuffer = runtimeStatusLineBuffer.slice(newlineIdx + 1);
+                  const ts = new Date().toISOString();
+                  const entries = complete
+                    .split("\n")
+                    .filter((line) => line.trim().length > 0)
+                    .flatMap((line) => parseCodexStdoutLine(line, ts));
+                  const update = deriveCodexRuntimeStatusUpdate(entries);
+                  if (update) {
+                    await ctx.onRuntimeProgress({ phase: "adapter_startup", ...update });
+                  }
+                }
+              } catch {
+                // best-effort; status is cosmetic
+              }
+            }
             await onLog(stream, chunk);
             return;
           }
@@ -1076,6 +1222,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         `Codex process threw after ${Date.now() - processStartedAt}ms: ${describeErrorForLogs(error)}`,
       );
       throw error;
+    } finally {
+      if (silentWindowHeartbeat) clearInterval(silentWindowHeartbeat);
     }
     await logRemoteTiming(
       [
@@ -1194,9 +1342,15 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   // a hard adapter failure, classify it as a transient upstream error and keep
   // the Codex session so the platform retries — resuming the same session when
   // the sandbox is still warm rather than restarting from scratch.
-  const buildRemoteTransportDropResult = (error: unknown): AdapterExecutionResult => {
+  const buildRemoteTransportDropResult = (
+    error: unknown,
+    liveSessionOverride: string | null = null,
+  ): AdapterExecutionResult => {
     const message = (error instanceof Error ? error.message : String(error)).trim();
-    const resumeSessionId = sessionId ?? runtimeSessionId ?? runtime.sessionId ?? null;
+    // Prefer the live thread id captured this run so the platform's retry can
+    // resume the session even on an initially-fresh run (was the `resume=none`
+    // gap: none of sessionId/runtimeSessionId existed for a first run).
+    const resumeSessionId = liveSessionOverride ?? sessionId ?? runtimeSessionId ?? runtime.sessionId ?? null;
     const resolvedSessionParams = resumeSessionId
       ? ({
           sessionId: resumeSessionId,
@@ -1264,31 +1418,87 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     await logRemoteTiming(preflightFailure ? "sandbox Paperclip preflight failed" : "sandbox Paperclip preflight passed");
     if (preflightFailure) return preflightFailure;
 
-    const initial = await runAttempt(sessionId);
-    if (
-      sessionId &&
-      !initial.proc.timedOut &&
-      (initial.proc.exitCode ?? 0) !== 0 &&
-      isCodexUnknownSessionError(initial.proc.stdout, initial.rawStderr)
-    ) {
-      await onLog(
-        "stdout",
-        `[paperclip] Codex resume session "${sessionId}" is unavailable; retrying with a fresh session.\n`,
-      );
-      const retry = await runAttempt(null);
-      return toResult(retry, true, true);
-    }
+    // Bounded in-run reconnect: when the exec transport drops mid-run, resume
+    // the Codex session against the still-warm sandbox in place instead of
+    // returning a failure — so the Paperclip run stays alive and never surfaces
+    // as failed. When the reconnect budget is exhausted (or there is nothing to
+    // resume), fall back to the transient-retry result so Paperclip's own
+    // retry/fail workflow takes over.
+    const firstAttemptStartedAt = Date.now();
+    let reconnectAttempts = 0;
+    let resumeId: string | null = sessionId;
+    for (;;) {
+      const elapsedSec = Math.floor((Date.now() - firstAttemptStartedAt) / 1000);
+      const attemptTimeoutSec =
+        reconnectAttempts === 0 ? timeoutSec : Math.max(MIN_INRUN_RECONNECT_BUDGET_SEC, timeoutSec - elapsedSec);
+      let attempt: CodexRunAttempt;
+      try {
+        attempt = await runAttempt(resumeId, attemptTimeoutSec);
+      } catch (error) {
+        // Only remote runs can suffer a transport drop; anything else is a real
+        // failure and propagates unchanged.
+        if (executionTargetIsRemote && isRemoteTransportDropError(error)) {
+          const resumable = liveSessionId ?? resumeId ?? runtimeSessionId ?? runtime.sessionId ?? null;
+          const budgetSec = timeoutSec - Math.floor((Date.now() - firstAttemptStartedAt) / 1000);
+          if (resumable && reconnectAttempts < MAX_INRUN_RECONNECT_ATTEMPTS && budgetSec >= MIN_INRUN_RECONNECT_BUDGET_SEC) {
+            reconnectAttempts += 1;
+            await onLog(
+              "stderr",
+              `[paperclip] codex_remote transport dropped mid-run; in-run reconnect ${reconnectAttempts}/${MAX_INRUN_RECONNECT_ATTEMPTS} — resuming Codex session ${resumable} on the warm sandbox (~${budgetSec}s budget left) instead of failing the run: ${describeErrorForLogs(error)}\n`,
+            );
+            await logRemoteTiming(
+              `transport drop: in-run reconnect ${reconnectAttempts}/${MAX_INRUN_RECONNECT_ATTEMPTS}, resuming ${resumable}, budget ${budgetSec}s`,
+            );
+            if (ctx.onRuntimeProgress) {
+              try {
+                await ctx.onRuntimeProgress({
+                  phase: "adapter_startup",
+                  message: `Reconnecting to sandbox (attempt ${reconnectAttempts}/${MAX_INRUN_RECONNECT_ATTEMPTS})…`,
+                });
+              } catch {
+                // cosmetic
+              }
+            }
+            await new Promise((resolve) => setTimeout(resolve, INRUN_RECONNECT_DELAY_MS));
+            resumeId = resumable;
+            continue;
+          }
+          await onLog(
+            "stderr",
+            `[paperclip] codex_remote transport dropped mid-run and in-run reconnect is exhausted (attempts=${reconnectAttempts}, hadSession=${Boolean(resumable)}, budget=${budgetSec}s); classifying as a transient upstream error so Paperclip retries: ${describeErrorForLogs(error)}\n`,
+          );
+          return buildRemoteTransportDropResult(error, liveSessionId);
+        }
+        throw error;
+      }
 
-    return toResult(initial, false, false);
+      // Codex process returned (did not drop). Handle the unavailable-resume
+      // fallback, then return the normal result.
+      if (
+        resumeId &&
+        !attempt.proc.timedOut &&
+        (attempt.proc.exitCode ?? 0) !== 0 &&
+        isCodexUnknownSessionError(attempt.proc.stdout, attempt.rawStderr)
+      ) {
+        await onLog(
+          "stdout",
+          `[paperclip] Codex resume session "${resumeId}" is unavailable; retrying with a fresh session.\n`,
+        );
+        const retry = await runAttempt(null);
+        return toResult(retry, true, true);
+      }
+
+      return toResult(attempt, false, reconnectAttempts > 0);
+    }
   } catch (error) {
-    // Only remote runs can suffer a transport drop; for local runs (or any
-    // other error shape) preserve the original failure.
+    // Safety net for a transport drop that escapes the loop (e.g. from tailscale
+    // bring-up or preflight): still prefer a transient retry over a hard fail.
     if (executionTargetIsRemote && isRemoteTransportDropError(error)) {
       await onLog(
         "stderr",
-        `[paperclip] codex_remote remote transport dropped mid-run; classifying as a transient upstream error so the run is retried (and resumed if the sandbox is still warm) instead of hard-failing: ${describeErrorForLogs(error)}\n`,
+        `[paperclip] codex_remote remote transport dropped; classifying as a transient upstream error so the run is retried (and resumed if the sandbox is still warm) instead of hard-failing: ${describeErrorForLogs(error)}\n`,
       );
-      return buildRemoteTransportDropResult(error);
+      return buildRemoteTransportDropResult(error, liveSessionId);
     }
     throw error;
   } finally {
