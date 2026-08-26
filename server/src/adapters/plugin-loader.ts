@@ -178,8 +178,6 @@ export async function loadExternalAdapterPackage(
 
   logger.info({ packageName, packageDir, entryPoint, modulePath, hasUiParser: !!uiParserSource }, "Loading external adapter package");
 
-  // Use a file:// URL, not a bare path: on Windows `import("C:\\...")` is
-  // rejected as an unsupported "c:" URL scheme.
   const mod = await import(pathToFileURL(modulePath).href);
   const adapterModule = validateAdapterModule(mod, packageName);
 
@@ -215,9 +213,6 @@ export async function reloadExternalAdapter(
   const packageDir = resolvePackageDir(record);
   const entryPoint = resolvePackageEntryPoint(packageDir);
   const modulePath = path.resolve(packageDir, entryPoint);
-  // pathToFileURL produces a valid file URL on every platform (e.g.
-  // file:///C:/... on Windows); the old `file://${path}` form left backslashes
-  // and a missing slash, which Windows rejects.
   const fileUrl = pathToFileURL(modulePath).href;
 
   // Bust ESM module cache so re-import loads fresh code from disk.

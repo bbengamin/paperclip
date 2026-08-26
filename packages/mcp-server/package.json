@@ -43,7 +43,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "@paperclipai/shared": "2026.608.0-canary.1",
     "zod": "^3.24.2"
   },
