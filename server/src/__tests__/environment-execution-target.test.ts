@@ -266,6 +266,7 @@ describe("resolveEnvironmentExecutionTarget", () => {
       "cursor",
       "gemini_local",
       "grok_local",
+      "kimi_local",
       "opencode_local",
       "pi_local",
     ]) {
@@ -359,7 +360,7 @@ describe("resolveEnvironmentExecutionTarget", () => {
     });
   });
 
-  it("resolves SSH execution targets for codex_remote", async () => {
+  it.each(["codex_remote", "kimi_local"])("resolves SSH execution targets for %s", async (adapterType) => {
     mockResolveEnvironmentDriverConfigForRuntime.mockResolvedValue({
       driver: "ssh",
       config: {
@@ -376,7 +377,7 @@ describe("resolveEnvironmentExecutionTarget", () => {
     const target = await resolveEnvironmentExecutionTarget({
       db: {} as never,
       companyId: "company-1",
-      adapterType: "codex_remote",
+      adapterType,
       environment: {
         id: "env-ssh-1",
         driver: "ssh",

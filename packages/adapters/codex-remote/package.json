@@ -64,8 +64,11 @@
   },
   "devDependencies": {
     "@paperclipai/adapter-utils": "workspace:*",
-    "@types/node": "^24.6.0",
+    "@types/node": "^24.0.0",
     "esbuild": "^0.28.0",
     "typescript": "^5.7.3"
+  },
+  "engines": {
+    "node": ">=24.11.0"
   }
 }
