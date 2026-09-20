@@ -1,0 +1,55 @@
+# Dokploy deployment of the Paperclip fork (host: rl-agents-1).
+#
+# Combines docker-compose.quickstart.yml with the fork override that was
+# previously applied by hand on agents-shared:
+#   - build target "production" (upstream's default self-hosted target; the
+#     newer "cloud" stage is for managed deployments and does not build here)
+#   - host networking, so the app listens directly on host port 3100
+#   - privileged + SYS_ADMIN/NET_ADMIN + /dev/net/tun for the nested Docker
+#     daemon (DinD) that runs agent workloads
+#
+# All values come from the Dokploy environment; nothing secret lives here.
+services:
+  paperclip:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: production
+    restart: unless-stopped
+    pids_limit: 2048
+    network_mode: host
+    privileged: true
+    security_opt:
+      - seccomp:unconfined
+      - apparmor:unconfined
+    cap_add:
+      - SYS_ADMIN
+      - SETUID
+      - SETGID
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun
+    environment:
+      HOST: "${HOST:-0.0.0.0}"
+      PORT: "${PORT:-3100}"
+      NODE_ENV: "${NODE_ENV:-production}"
+      SERVE_UI: "${SERVE_UI:-true}"
+      PAPERCLIP_HOME: "${PAPERCLIP_HOME:-/paperclip}"
+      PAPERCLIP_CONFIG: "${PAPERCLIP_CONFIG:-}"
+      PAPERCLIP_INSTANCE_ID: "${PAPERCLIP_INSTANCE_ID:-default}"
+      PAPERCLIP_DEPLOYMENT_MODE: "${PAPERCLIP_DEPLOYMENT_MODE:-authenticated}"
+      PAPERCLIP_DEPLOYMENT_EXPOSURE: "${PAPERCLIP_DEPLOYMENT_EXPOSURE:-public}"
+      PAPERCLIP_PUBLIC_URL: "${PAPERCLIP_PUBLIC_URL:?PAPERCLIP_PUBLIC_URL must be set}"
+      PAPERCLIP_MIGRATION_AUTO_APPLY: "${PAPERCLIP_MIGRATION_AUTO_APPLY:-true}"
+      PAPERCLIP_DOCKER_RUNTIME: "${PAPERCLIP_DOCKER_RUNTIME:-rootless}"
+      PAPERCLIP_AUTH_DISABLE_SIGN_UP: "${PAPERCLIP_AUTH_DISABLE_SIGN_UP:-}"
+      HEARTBEAT_SCHEDULER_ENABLED: "${HEARTBEAT_SCHEDULER_ENABLED:-}"
+      DATABASE_URL: "${DATABASE_URL:?DATABASE_URL must be set}"
+      BETTER_AUTH_SECRET: "${BETTER_AUTH_SECRET:?BETTER_AUTH_SECRET must be set}"
+      ANTHROPIC_BASE_URL: "${ANTHROPIC_BASE_URL:-}"
+      ANTHROPIC_AUTH_TOKEN: "${ANTHROPIC_AUTH_TOKEN:-}"
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+    volumes:
+      - "${PAPERCLIP_DATA_DIR:-/srv/paperclip-data}:/paperclip"
+      - "${HERMES_DATA_DIR:-/srv/hermes-data}:/paperclip/.hermes"
