@@ -1,5 +1,3 @@
-import type { AdapterModelProfileDefinition } from "@paperclipai/adapter-utils";
-
 export const type = "codex_remote";
 export const label = "Codex (remote)";
 
@@ -49,20 +47,6 @@ export const models = [
   { id: "gpt-5-nano", label: "gpt-5-nano" },
   { id: "o3-mini", label: "o3-mini" },
   { id: "codex-mini-latest", label: "Codex Mini" },
-];
-
-export const modelProfiles: AdapterModelProfileDefinition[] = [
-  {
-    key: "cheap",
-    label: "Cheap",
-    description: "Use the lowest-cost known Codex local model lane without changing the primary model.",
-    adapterConfig: {
-      model: "gpt-5.3-codex-spark",
-      // Spark is the cheap lane by model price; high effort keeps Codex coding behavior usable for delegated work.
-      modelReasoningEffort: "high",
-    },
-    source: "adapter_default",
-  },
 ];
 
 export const agentConfigurationDoc = `# codex_remote agent configuration

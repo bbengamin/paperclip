@@ -29,7 +29,7 @@ only on **published** `@paperclipai/adapter-utils` exports.
   default, `dangerouslyBypassApprovalsAndSandbox`, `remoteWorkspaceSync: false`)
   over the package's base `execute`/`testEnvironment`.
 - `./server` — raw building blocks (`execute`, `skills`, `quota`, `sessionCodec`, …).
-- `./meta` — isomorphic metadata (`models`, `modelProfiles`, `agentConfigurationDoc`).
+- `./meta` — isomorphic metadata (`models`, `agentConfigurationDoc`).
 - `./ui` — UI helpers (`parseCodexStdoutLine`, `buildCodexRemoteConfig`).
 - `./cli` — quota probe CLI.
 

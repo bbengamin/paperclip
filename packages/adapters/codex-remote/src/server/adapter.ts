@@ -27,7 +27,7 @@ import { execute as baseExecute } from "./execute.js";
 import { testEnvironment as baseTestEnvironment } from "./test.js";
 import { listCodexSkills, syncCodexSkills } from "./skills.js";
 import { sessionCodec, getQuotaWindows } from "./index.js";
-import { models, modelProfiles, agentConfigurationDoc, type } from "../index.js";
+import { models, agentConfigurationDoc, type } from "../index.js";
 
 export const CODEX_REMOTE_TYPE = type;
 
@@ -188,7 +188,6 @@ export function createServerAdapter(): ServerAdapterModule {
     sessionCodec,
     sessionManagement: getAdapterSessionManagement(CODEX_REMOTE_TYPE) ?? undefined,
     models,
-    modelProfiles,
     supportsLocalAgentJwt: true,
     supportsInstructionsBundle: true,
     instructionsPathKey: "instructionsFilePath",
