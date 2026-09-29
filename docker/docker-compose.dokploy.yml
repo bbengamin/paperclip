@@ -1,34 +1,23 @@
-# Dokploy deployment of the Paperclip fork (host: rl-agents-1).
+# Dokploy deployment of Paperclip (host: rl-agents-1).
 #
-# Combines docker-compose.quickstart.yml with the fork override that was
-# previously applied by hand on agents-shared:
-#   - build target "production" (upstream's default self-hosted target; the
-#     newer "cloud" stage is for managed deployments and does not build here)
-#   - host networking, so the app listens directly on host port 3100
-#   - privileged + SYS_ADMIN/NET_ADMIN + /dev/net/tun for the nested Docker
-#     daemon (DinD) that runs agent workloads
+# Runs the upstream release image plus a built LLM Wiki plugin
+# (Dockerfile.dokploy); the fork's code is not used. Host networking, so the
+# app listens directly on host port 3100.
+#
+# Agents do not run here any more, so the nested Docker daemon (DinD) and what
+# it needed (privileged, SYS_ADMIN/NET_ADMIN, /dev/net/tun, unconfined
+# seccomp/apparmor, PAPERCLIP_DOCKER_RUNTIME) are gone. To run agents again,
+# go back to the fork build: ref deploy/dokploy-fork-v2026.916.1.
 #
 # All values come from the Dokploy environment; nothing secret lives here.
 services:
   paperclip:
     build:
-      context: ..
-      dockerfile: Dockerfile
-      target: production
+      context: .
+      dockerfile: Dockerfile.dokploy
     restart: unless-stopped
     pids_limit: 2048
     network_mode: host
-    privileged: true
-    security_opt:
-      - seccomp:unconfined
-      - apparmor:unconfined
-    cap_add:
-      - SYS_ADMIN
-      - SETUID
-      - SETGID
-      - NET_ADMIN
-    devices:
-      - /dev/net/tun
     environment:
       HOST: "${HOST:-0.0.0.0}"
       PORT: "${PORT:-3100}"
@@ -41,7 +30,6 @@ services:
       PAPERCLIP_DEPLOYMENT_EXPOSURE: "${PAPERCLIP_DEPLOYMENT_EXPOSURE:-public}"
       PAPERCLIP_PUBLIC_URL: "${PAPERCLIP_PUBLIC_URL:?PAPERCLIP_PUBLIC_URL must be set}"
       PAPERCLIP_MIGRATION_AUTO_APPLY: "${PAPERCLIP_MIGRATION_AUTO_APPLY:-true}"
-      PAPERCLIP_DOCKER_RUNTIME: "${PAPERCLIP_DOCKER_RUNTIME:-rootless}"
       PAPERCLIP_AUTH_DISABLE_SIGN_UP: "${PAPERCLIP_AUTH_DISABLE_SIGN_UP:-}"
       HEARTBEAT_SCHEDULER_ENABLED: "${HEARTBEAT_SCHEDULER_ENABLED:-}"
       # Defaults to true: an empty value would read as "false" and silently

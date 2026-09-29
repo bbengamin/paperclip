@@ -1,0 +1,29 @@
+# syntax=docker/dockerfile:1
+#
+# Paperclip on rl-agents-1: the upstream release image plus a built LLM Wiki
+# plugin. Nothing from the fork goes into this image.
+#
+# The upstream image ships its bundled plugins as source only (no dist/). The
+# installed LLM Wiki plugin loads from /app/packages/plugins/plugin-llm-wiki,
+# so it needs this build layer. The image keeps the full workspace with dev
+# dependencies, so the build takes seconds and needs no Rust toolchain.
+#
+# The sandbox-provider plugins are not built: they are disabled in Paperclip
+# because no agents run. Build them here before enabling them again.
+#
+# To update Paperclip, bump the tag and digest below (see
+# docs/runbooks/update-paperclip.md in the devops repo), commit, push and
+# deploy.
+ARG PAPERCLIP_IMAGE=ghcr.io/paperclipai/paperclip:2026.916.1@sha256:a02ac35ac41df911af477422ea0e781cf41d2b2c600c66f0a5ac9d8c63f52c2c
+FROM ${PAPERCLIP_IMAGE}
+
+# /app is owned by node in the upstream image; build as node so dist/ is too.
+USER node
+RUN pnpm --filter @paperclipai/plugin-llm-wiki build \
+  && test -f packages/plugins/plugin-llm-wiki/dist/manifest.js \
+  && test -f packages/plugins/plugin-llm-wiki/dist/worker.js \
+  && test -d packages/plugins/plugin-llm-wiki/dist/ui
+
+# The upstream entrypoint starts as root, fixes /paperclip ownership, then
+# drops to node with gosu.
+USER root
