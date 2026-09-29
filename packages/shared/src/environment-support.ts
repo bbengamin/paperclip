@@ -72,6 +72,7 @@ const REMOTE_MANAGED_ADAPTERS = new Set<AgentAdapterType>([
   // codex-remote feature branch. Candidate for an upstream PR (ideally a
   // declarative seam rather than a hardcoded entry).
   "codex_remote",
+  "paperclip_runner",
   "cursor",
   "gemini_local",
   "grok_local",

@@ -32,6 +32,8 @@ paperclipai context set --api-base https://paperclip.right.link --company-id <co
 paperclipai auth login --api-base https://paperclip.right.link
 ```
 
+Inside an active heartbeat, Paperclip also injects `PAPERCLIP_RUNTIME_TOOLS_*` variables. They enable the run-scoped `connections_search` and `connection_request` tools and expire with the run.
+
 ## Usage
 
 ```sh
@@ -76,6 +78,11 @@ Use explicit env vars when you want a host-local override:
 ```
 
 ## Tool Surface
+
+Run-scoped connection tools:
+
+- `connections_search`
+- `connection_request`
 
 Read tools:
 
