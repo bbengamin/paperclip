@@ -44,6 +44,9 @@ services:
       PAPERCLIP_DOCKER_RUNTIME: "${PAPERCLIP_DOCKER_RUNTIME:-rootless}"
       PAPERCLIP_AUTH_DISABLE_SIGN_UP: "${PAPERCLIP_AUTH_DISABLE_SIGN_UP:-}"
       HEARTBEAT_SCHEDULER_ENABLED: "${HEARTBEAT_SCHEDULER_ENABLED:-}"
+      # Defaults to true: an empty value would read as "false" and silently
+      # disable backups (server/src/config.ts compares against "true").
+      PAPERCLIP_DB_BACKUP_ENABLED: "${PAPERCLIP_DB_BACKUP_ENABLED:-true}"
       DATABASE_URL: "${DATABASE_URL:?DATABASE_URL must be set}"
       BETTER_AUTH_SECRET: "${BETTER_AUTH_SECRET:?BETTER_AUTH_SECRET must be set}"
       ANTHROPIC_BASE_URL: "${ANTHROPIC_BASE_URL:-}"
