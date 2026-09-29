@@ -44,7 +44,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
-    "@paperclipai/shared": "2026.831.1",
+    "@paperclipai/shared": "2026.916.1",
     "zod": "^4.4.3"
   },
   "devDependencies": {

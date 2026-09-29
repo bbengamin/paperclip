@@ -485,8 +485,8 @@ importers:
         specifier: ^1.30.0
         version: 1.30.0(zod@4.4.3)
       '@paperclipai/shared':
-        specifier: 2026.831.1
-        version: 2026.831.1
+        specifier: 2026.916.1
+        version: 2026.916.1
       zod:
         specifier: ^4.4.3
         version: 4.4.3
@@ -3459,8 +3459,8 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@paperclipai/shared@2026.831.1':
-    resolution: {integrity: sha512-rkpful4jL71GIl8+SRBD4oUm1Kcrz4V4RXz75kQYq8DX2xmLA0gKzcDWeenouYrAmFvzeOshDCQpc1u8FrN4xQ==}
+  '@paperclipai/shared@2026.916.1':
+    resolution: {integrity: sha512-SrAuGkqt0hpuTJ82J0Hk6tYao/7I7djp3wzYaYT7rej3se9PnZ5cKT8HI5/du9TM0RLO7+fElhdVG7IDyGuIZg==}
     engines: {node: '>=24.11.0'}
 
   '@paralleldrive/cuid2@2.3.1':
@@ -7648,7 +7648,6 @@ packages:
 
   opencode-ai@1.18.29:
     resolution: {integrity: sha512-syIDVwlrYTgTOXzZe9SkInJWethbq6l3SNC762UeXyO0a9V0wGfd+U4yACvppwNBnhIsl0j2QPYYCyLpNaSomg==}
-    cpu: [arm64, x64]
     os: [darwin, linux, win32]
     hasBin: true
 
@@ -11340,7 +11339,7 @@ snapshots:
   '@oxc-resolver/binding-win32-x64-msvc@11.21.2':
     optional: true
 
-  '@paperclipai/shared@2026.831.1':
+  '@paperclipai/shared@2026.916.1':
     dependencies:
       zod: 4.4.3
 
